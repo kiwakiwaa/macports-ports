@@ -1,0 +1,20 @@
+Upstream-Status: Submitted [https://bugzilla.samba.org/show_bug.cgi?id=15888]
+--- lib/replace/replace.h.orig
++++ lib/replace/replace.h
+@@ -53,7 +53,15 @@
+ #ifndef HAVE_DECL_EWOULDBLOCK
+ #define EWOULDBLOCK EAGAIN
+ #endif
+-
++/*
++ * Some older libc headers do not define the POSIX robust mutex error
++ * values. Samba uses ENOTRECOVERABLE as a generic unrecoverable error,
++ * so map it to EIO when the platform does not provide the symbol.
++ */
++#ifndef ENOTRECOVERABLE
++#define ENOTRECOVERABLE EIO
++#endif
++
+ #if defined(_MSC_VER) || defined(__MINGW32__)
+ #include "win32_replace.h"
+ #endif

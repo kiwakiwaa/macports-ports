@@ -77,6 +77,9 @@ patchfiles-append   patch-bug-15030.diff
 # https://bugzilla.samba.org/show_bug.cgi?id=15763
 patchfiles-append   patch-ldb-test.diff
 
+# ENOTRECOVERABLE is not available in older libc headers.
+patchfiles-append   patch-enotrecoverable.diff
+
 configure.perl          ${perl5.bin}
 configure.python        ${prefix}/bin/python${py_ver}
 configure.env-append    YAPP=${prefix}/bin/yapp-${perl5.major}
