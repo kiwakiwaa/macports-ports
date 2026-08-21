@@ -1,0 +1,7 @@
+diff --git a/t/t4211-line-log.sh b/t/t4211-line-log.sh
+index 540ba9e..2df4535 100755
+--- a/t/t4211-line-log.sh
++++ b/t/t4211-line-log.sh
+@@ -643 +643 @@ test_expect_success 'setup for no-newline-at-eof tests' '
+-	sed "s/return 2/return 22/" noeol.c >tmp && mv tmp noeol.c &&
++	$PERL_PATH -pe "s/return 2/return 22/" noeol.c >tmp && mv tmp noeol.c &&

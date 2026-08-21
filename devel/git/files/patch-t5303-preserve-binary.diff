@@ -1,0 +1,10 @@
+diff --git a/t/t5303-pack-corruption-resilience.sh b/t/t5303-pack-corruption-resilience.sh
+index 8b31e5f..1111111 100755
+--- a/t/t5303-pack-corruption-resilience.sh
++++ b/t/t5303-pack-corruption-resilience.sh
+@@ -106 +106 @@ test_expect_success 'create corruption in data of first object' '
+-	sed "s/ base /abcdef/" ${pack}.pack >${pack}.pack.munged &&
++	$PERL_PATH -pe "s/ base /abcdef/" ${pack}.pack >${pack}.pack.munged &&
+@@ -164 +164 @@ test_expect_success 'create corruption in data of first delta' '
+-	sed "s/ delta1 /abcdefgh/" ${pack}.pack >${pack}.pack.munged &&
++	$PERL_PATH -pe "s/ delta1 /abcdefgh/" ${pack}.pack >${pack}.pack.munged &&

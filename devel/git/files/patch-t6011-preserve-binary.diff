@@ -1,0 +1,7 @@
+diff --git a/t/t6011-rev-list-with-bad-commit.sh b/t/t6011-rev-list-with-bad-commit.sh
+index e12c39e..2222222 100755
+--- a/t/t6011-rev-list-with-bad-commit.sh
++++ b/t/t6011-rev-list-with-bad-commit.sh
+@@ -40 +40 @@ test_expect_success 'corrupt second commit object' '
+-		sed "s/second commit/socond commit/" "$p" >"$p.munged" &&
++		$PERL_PATH -pe "s/second commit/socond commit/" "$p" >"$p.munged" &&

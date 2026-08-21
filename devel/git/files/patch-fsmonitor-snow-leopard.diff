@@ -1,0 +1,317 @@
+--- a/builtin/fsmonitor--daemon.c
++++ b/builtin/fsmonitor--daemon.c
+@@ -160,7 +160,7 @@
+ {
+ 	/* assert current thread holding state->main_lock */
+ 
+-	int fd;
++	int fd = -1;
+ 	struct fsmonitor_cookie_item *cookie;
+ 	struct strbuf cookie_pathname = STRBUF_INIT;
+ 	struct strbuf cookie_filename = STRBUF_INIT;
+@@ -199,12 +199,13 @@
+ 	}
+ 
+ 	/*
+-	 * Technically, close() and unlink() can fail, but we don't
+-	 * care here.  We only created the file to trigger a watch
+-	 * event from the FS to know that when we're up to date.
++	 * Technically, close() can fail, but we don't care here.  We only
++	 * created the file to trigger a watch event from the FS to know that
++	 * when we're up to date.  Keep it present until the directory-level
++	 * Snow Leopard event identifies it to the listener.
+ 	 */
+ 	close(fd);
+-	unlink(cookie_pathname.buf);
++	fsm_listen__flush(state);
+ 
+ 	/*
+ 	 * Wait for the listener thread to observe the cookie file.
+@@ -234,6 +235,8 @@
+ 	}
+ 
+ done:
++	if (fd >= 0)
++		unlink(cookie_pathname.buf);
+ 	hashmap_remove(&state->cookies, &cookie->entry, NULL);
+ 
+ 	result = cookie->result;
+--- a/compat/fsmonitor/fsm-listen-darwin.c
++++ b/compat/fsmonitor/fsm-listen-darwin.c
+@@ -5,8 +5,30 @@
+ #include <CoreFoundation/CoreFoundation.h>
+ #include <CoreServices/CoreServices.h>
+ 
+-#ifndef AVAILABLE_MAC_OS_X_VERSION_10_13_AND_LATER
++#if MAC_OS_X_VERSION_MAX_ALLOWED < 1070
+ /*
++ * Snow Leopard reports directory-level FSEvents and does not declare the
++ * per-item flags.  Define the values so the shared diagnostics remain usable;
++ * the legacy callback path does not infer file-level meaning from them.
++ */
++#define FSMONITOR_LEGACY_FSEVENTS
++#define kFSEventStreamEventFlagItemCreated        0x00000100
++#define kFSEventStreamEventFlagItemRemoved        0x00000200
++#define kFSEventStreamEventFlagItemInodeMetaMod   0x00000400
++#define kFSEventStreamEventFlagItemRenamed        0x00000800
++#define kFSEventStreamEventFlagItemModified       0x00001000
++#define kFSEventStreamEventFlagItemFinderInfoMod  0x00002000
++#define kFSEventStreamEventFlagItemChangeOwner    0x00004000
++#define kFSEventStreamEventFlagItemXattrMod       0x00008000
++#define kFSEventStreamEventFlagItemIsFile         0x00010000
++#define kFSEventStreamEventFlagItemIsDir          0x00020000
++#define kFSEventStreamEventFlagItemIsSymlink      0x00040000
++#define kFSEventStreamEventFlagOwnEvent           0x00080000
++#define kFSEventStreamEventFlagItemIsHardlink     0x00100000
++#define kFSEventStreamEventFlagItemIsLastHardlink 0x00200000
++#define kFSEventStreamEventFlagItemCloned         0x00400000
++#elif !defined(AVAILABLE_MAC_OS_X_VERSION_10_13_AND_LATER)
++/*
+  * This enum value was added in 10.13 to:
+  *
+  * /Applications/Xcode.app/Contents/Developer/Platforms/ \
+@@ -24,6 +46,9 @@
+ #endif
+ 
+ #include "git-compat-util.h"
++#ifdef FSMONITOR_LEGACY_FSEVENTS
++#include <dirent.h>
++#endif
+ #include "fsmonitor-ll.h"
+ #include "fsm-listen.h"
+ #include "fsmonitor--daemon.h"
+@@ -191,7 +216,25 @@
+ 	free(composed);
+ }
+ 
++#ifdef FSMONITOR_LEGACY_FSEVENTS
++static void add_cookie_names(struct fsmonitor_daemon_state *state,
++			     struct string_list *cookie_list)
++{
++	DIR *dir = opendir(state->path_cookie_prefix.buf);
++	struct dirent *de;
+ 
++	if (!dir)
++		return;
++
++	/* Directory-level events cannot identify the cookie that caused them. */
++	while ((de = readdir(dir))) {
++		if (de->d_name[0] != '.')
++			string_list_append(cookie_list, de->d_name);
++	}
++	closedir(dir);
++}
++#endif
++
+ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
+ 			     void *ctx,
+ 			     size_t num_of_events,
+@@ -342,6 +385,30 @@
+ 			 * know how much to invalidate/refresh.
+ 			 */
+ 
++#ifdef FSMONITOR_LEGACY_FSEVENTS
++			{
++				const char *rel = path_k +
++					state->path_worktree_watch.len;
++
++				/* A root-level event has no narrower safe invalidation. */
++				while (is_dir_sep(*rel))
++					rel++;
++				if (!*rel) {
++					fsmonitor_force_resync(state);
++					fsmonitor_batch__free_list(batch);
++					batch = NULL;
++					break;
++				}
++				strbuf_reset(&tmp);
++				strbuf_addstr(&tmp, rel);
++				if (!is_dir_sep(tmp.buf[tmp.len - 1]))
++					strbuf_addch(&tmp, '/');
++
++				if (!batch)
++					batch = fsmonitor_batch__new();
++				my_add_path(batch, tmp.buf);
++			}
++#else
+ 			if (event_flags[k] & (kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemIsSymlink)) {
+ 				const char *rel = path_k +
+ 					state->path_worktree_watch.len + 1;
+@@ -363,6 +430,7 @@
+ 					batch = fsmonitor_batch__new();
+ 				my_add_path(batch, tmp.buf);
+ 			}
++#endif
+ 
+ 			break;
+ 
+@@ -375,6 +443,9 @@
+ 	}
+ 
+ 	free(resolved);
++#ifdef FSMONITOR_LEGACY_FSEVENTS
++	add_cookie_names(state, &cookie_list);
++#endif
+ 	fsmonitor_publish(state, batch, &cookie_list);
+ 	string_list_clear(&cookie_list, 0);
+ 	strbuf_release(&tmp);
+@@ -414,8 +485,10 @@
+ int fsm_listen__ctor(struct fsmonitor_daemon_state *state)
+ {
+ 	FSEventStreamCreateFlags flags = kFSEventStreamCreateFlagNoDefer |
+-		kFSEventStreamCreateFlagWatchRoot |
+-		kFSEventStreamCreateFlagFileEvents;
++		kFSEventStreamCreateFlagWatchRoot;
++#ifndef FSMONITOR_LEGACY_FSEVENTS
++	flags |= kFSEventStreamCreateFlagFileEvents;
++#endif
+ 	FSEventStreamContext ctx = {
+ 		0,
+ 		state,
+@@ -496,6 +569,14 @@
+ 	pthread_mutex_unlock(&data->dq_lock);
+ }
+ 
++void fsm_listen__flush(struct fsmonitor_daemon_state *state)
++{
++	struct fsm_listen_data *data = state->listen_data;
++
++	/* Snow Leopard otherwise delivers journal changes in five-second batches. */
++	FSEventStreamFlushAsync(data->stream);
++}
++
+ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
+ {
+ 	struct fsm_listen_data *data;
+--- a/compat/fsmonitor/fsm-listen.h
++++ b/compat/fsmonitor/fsm-listen.h
+@@ -45,5 +45,8 @@
+  */
+ void fsm_listen__stop_async(struct fsmonitor_daemon_state *state);
+ 
++/* Ask the backend to deliver filesystem events already awaiting publication. */
++void fsm_listen__flush(struct fsmonitor_daemon_state *state);
++
+ #endif /* HAVE_FSMONITOR_DAEMON_BACKEND */
+ #endif /* FSM_LISTEN_H */
+--- a/t/t7527-builtin-fsmonitor.sh
++++ b/t/t7527-builtin-fsmonitor.sh
+@@ -59,6 +59,10 @@
+ 	test_done
+ fi
+ 
++test_lazy_prereq FSMONITOR_FILE_EVENTS '
++	test -z "$GIT_TEST_FSMONITOR_DIRECTORY_EVENTS"
++'
++
+ stop_daemon_delete_repo () {
+ 	r=$1 &&
+ 	{ maybe_timeout 30 git -C $r fsmonitor--daemon stop 2>/dev/null || :; } &&
+@@ -488,7 +492,7 @@
+ 	done
+ }
+ 
+-test_expect_success 'edit some files' '
++test_expect_success FSMONITOR_FILE_EVENTS 'edit some files' '
+ 	test_when_finished clean_up_repo_and_stop_daemon &&
+ 
+ 	start_daemon --tf "$PWD/.git/trace" &&
+@@ -501,7 +505,7 @@
+ 	retry_grep "^event: dir1/untracked$" .git/trace
+ '
+ 
+-test_expect_success 'create some files' '
++test_expect_success FSMONITOR_FILE_EVENTS 'create some files' '
+ 	test_when_finished clean_up_repo_and_stop_daemon &&
+ 
+ 	start_daemon --tf "$PWD/.git/trace" &&
+@@ -513,7 +517,7 @@
+ 	retry_grep "^event: new$"      .git/trace
+ '
+ 
+-test_expect_success 'delete some files' '
++test_expect_success FSMONITOR_FILE_EVENTS 'delete some files' '
+ 	test_when_finished clean_up_repo_and_stop_daemon &&
+ 
+ 	start_daemon --tf "$PWD/.git/trace" &&
+@@ -525,7 +529,7 @@
+ 	retry_grep "^event: delete$"      .git/trace
+ '
+ 
+-test_expect_success 'rename some files' '
++test_expect_success FSMONITOR_FILE_EVENTS 'rename some files' '
+ 	test_when_finished clean_up_repo_and_stop_daemon &&
+ 
+ 	start_daemon --tf "$PWD/.git/trace" &&
+@@ -540,7 +544,7 @@
+ 	retry_grep "^event: renamed$"      .git/trace
+ '
+ 
+-test_expect_success 'rename directory' '
++test_expect_success FSMONITOR_FILE_EVENTS 'rename directory' '
+ 	test_when_finished clean_up_repo_and_stop_daemon &&
+ 
+ 	start_daemon --tf "$PWD/.git/trace" &&
+@@ -551,7 +555,7 @@
+ 	retry_grep "^event: dirrenamed/*$"  .git/trace
+ '
+ 
+-test_expect_success 'file changes to directory' '
++test_expect_success FSMONITOR_FILE_EVENTS 'file changes to directory' '
+ 	test_when_finished clean_up_repo_and_stop_daemon &&
+ 
+ 	start_daemon --tf "$PWD/.git/trace" &&
+@@ -562,7 +566,7 @@
+ 	retry_grep "^event: delete/new$" .git/trace
+ '
+ 
+-test_expect_success 'directory changes to a file' '
++test_expect_success FSMONITOR_FILE_EVENTS 'directory changes to a file' '
+ 	test_when_finished clean_up_repo_and_stop_daemon &&
+ 
+ 	start_daemon --tf "$PWD/.git/trace" &&
+@@ -602,7 +606,7 @@
+ # the 'test-tool fsmonitor-client flush' command can be used to send a
+ # "flush" message to a running daemon and ask it to do a flush/resync.
+ 
+-test_expect_success 'flush cached data' '
++test_expect_success FSMONITOR_FILE_EVENTS 'flush cached data' '
+ 	test_when_finished "stop_daemon_delete_repo test_flush" &&
+ 
+ 	git init test_flush &&
+@@ -1043,7 +1047,7 @@
+ # operation or does it receive the spelling preserved with
+ # the file/directory.
+ #
+-test_expect_success CASE_INSENSITIVE_FS 'case insensitive+preserving' '
++test_expect_success CASE_INSENSITIVE_FS,FSMONITOR_FILE_EVENTS 'case insensitive+preserving' '
+ 	test_when_finished "stop_daemon_delete_repo test_insensitive" &&
+ 
+ 	git init test_insensitive &&
+@@ -1090,7 +1094,7 @@
+ # emit both and let the client decide (when necessary).  This is
+ # similar to "core.precomposeUnicode".
+ #
+-test_expect_success !UNICODE_COMPOSITION_SENSITIVE 'Unicode nfc/nfd' '
++test_expect_success !UNICODE_COMPOSITION_SENSITIVE,FSMONITOR_FILE_EVENTS 'Unicode nfc/nfd' '
+ 	test_when_finished "stop_daemon_delete_repo test_unicode" &&
+ 
+ 	git init test_unicode &&
+@@ -1180,7 +1184,7 @@
+ #
+ # The setup is a little contrived.
+ #
+-test_expect_success CASE_INSENSITIVE_FS 'fsmonitor subdir case wrong on disk' '
++test_expect_success CASE_INSENSITIVE_FS,FSMONITOR_FILE_EVENTS 'fsmonitor subdir case wrong on disk' '
+ 	test_when_finished "stop_daemon_delete_repo subdir_case_wrong" &&
+ 
+ 	git init subdir_case_wrong &&
+@@ -1257,7 +1261,7 @@
+ 	grep -q " M dir1/dir2/dir3/file3" "$PWD/subdir_case_wrong.out"
+ '
+ 
+-test_expect_success CASE_INSENSITIVE_FS 'fsmonitor file case wrong on disk' '
++test_expect_success CASE_INSENSITIVE_FS,FSMONITOR_FILE_EVENTS 'fsmonitor file case wrong on disk' '
+ 	test_when_finished "stop_daemon_delete_repo file_case_wrong" &&
+ 
+ 	git init file_case_wrong &&
