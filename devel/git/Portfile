@@ -195,7 +195,7 @@ if {${os.platform} eq "darwin" && ${os.major} < 11} {
     append RUSTFLAGS   " -C link-arg=-fuse-ld=${legacy_linker}"
 }
 
-build.env-append    RUSTFLAGS="${RUSTFLAGS}"
+build.env-append    RUSTFLAGS=${RUSTFLAGS}
 
 build.args          CFLAGS="${CFLAGS}" \
                     LDFLAGS="${LDFLAGS}" \
