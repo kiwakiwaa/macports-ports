@@ -96,6 +96,15 @@ if { ${os.platform} eq "darwin" && ${os.major} < 10 } {
     patchfiles-append   patch-no_CFURLSetResourcePropertyForKey.diff
 }
 
+if {${os.platform} eq "darwin" && ${os.major} < 11} {
+    # Rust's File::try_clone returns EBADF for cc's pipe writer on Snow Leopard.
+    # Use the native dup(2) operation while preserving cc's parallel build path.
+    post-patch {
+        system -W ${workpath}/.home/.cargo/macports/cc-1.0.83 \
+            "${patch.cmd} ${patch.pre_args} < [shellescape ${filespath}/patch-cc-dup-pipe-on-snow-leopard.diff]"
+    }
+}
+
 # Use MacPorts curl
 # https://doc.rust-lang.org/cargo/commands/cargo-install.html
 # Features of direct dependencies may be enabled with <dep-name>/<feature-name> syntax.

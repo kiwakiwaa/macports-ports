@@ -1,0 +1,28 @@
+--- src/lib.rs.orig	2023-11-22 19:59:45.000000000 +0000
++++ src/lib.rs	2023-11-22 19:59:45.000000000 +0000
+@@ -4001,6 +4001,25 @@
+         &mut self.pipe_writer
+     }
+ 
++    #[cfg(target_os = "macos")]
++    fn pipe_writer_cloned(&self) -> Result<Option<File>, Error> {
++        use std::os::unix::io::{AsRawFd, FromRawFd};
++
++        self.pipe_writer
++            .as_ref()
++            .map(|writer| {
++                let descriptor = unsafe { libc::dup(writer.as_raw_fd()) };
++                if descriptor == -1 {
++                    Err(io::Error::last_os_error())
++                } else {
++                    Ok(unsafe { File::from_raw_fd(descriptor) })
++                }
++            })
++            .transpose()
++            .map_err(From::from)
++    }
++
++    #[cfg(not(target_os = "macos"))]
+     fn pipe_writer_cloned(&self) -> Result<Option<File>, Error> {
+         self.pipe_writer
+             .as_ref()
