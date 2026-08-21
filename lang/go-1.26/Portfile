@@ -1,10 +1,16 @@
 # -*- coding: utf-8; mode: tcl; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- vim:fenc=utf-8:ft=tcl:et:sw=4:ts=4:sts=4
 
 PortSystem          1.0
+PortGroup           legacysupport 1.1
 PortGroup           go_toolchain 1.0
 
+set snow_leopard    [expr {${os.platform} eq "darwin" && ${os.major} == 10}]
+if {${snow_leopard}} {
+    go_toolchain.bootstrap_from_source yes
+}
+
 go_toolchain.setup  1.26.7
-revision            0
+revision            3
 
 checksums           \
                     go1.26.7.src.tar.gz \
@@ -19,3 +25,85 @@ checksums           \
                     rmd160  385d8410e958b27301b9e328be57f719ada835cc \
                     sha256  92e8b34bff3c89ab16404c595669ac8cb004cc2f676dcbd1f5b87a6b8def3b47 \
                     size    67852067
+
+if {${snow_leopard}} {
+    # Official Go bootstrap binaries require a newer macOS. Build each
+    # required generation from source, beginning with MacPorts' working 1.17
+    # toolchain, so every executable in the chain runs on this host.
+    platforms               "darwin >= 10"
+    known_fail              no
+    supported_archs         x86_64
+    configure.compiler      macports-clang-11
+
+    depends_build-append    port:go-1.17
+    depends_lib-append      port:curl-ca-bundle
+
+    set bootstrap_versions  {1.20.14 1.22.12 1.24.13}
+    foreach bootstrap_version ${bootstrap_versions} {
+        distfiles-append go${bootstrap_version}.src${extract.suffix}
+    }
+
+    checksums-append    \
+                        go1.20.14.src.tar.gz \
+                        rmd160  f8a9337b5bafc8150b17e490b4a08673ed914046 \
+                        sha256  1aef321a0e3e38b7e91d2d7eb64040666cabdcc77d383de3c9522d0d69b67f4e \
+                        size    26202564 \
+                        go1.22.12.src.tar.gz \
+                        rmd160  f82caa31483b224cb04959ed5fdd35dbcacbadcc \
+                        sha256  012a7e1f37f362c0918c1dfa3334458ac2da1628c4b9cf4d9ca02db986e17d71 \
+                        size    27566409 \
+                        go1.24.13.src.tar.gz \
+                        rmd160  58bf09c700493823192e64de767158f284c6c9a3 \
+                        sha256  639a6204c2486b137df1eb6e78ee3ed038f9877d0e4b5a465e796a2153f858d7 \
+                        size    30802752
+
+    patchfiles-append       patch-go1.26.7-snow-leopard.diff
+    patch.pre_args          -p1
+
+    set legacy_dylib       ${prefix}/lib/libMacportsLegacySupport.dylib
+    build.env-append       GOHOSTARCH=amd64 \
+                           CGO_ENABLED=1 \
+                           GO_EXTLINK_ENABLED=1 \
+                           MACOSX_DEPLOYMENT_TARGET=10.6 \
+                           BOOT_GO_LDFLAGS=-extldflags=${legacy_dylib} \
+                           GO_LDFLAGS=-extldflags=${legacy_dylib} \
+                           "CGO_LDFLAGS=-g -O2 ${legacy_dylib}"
+
+    post-extract {
+        foreach bootstrap_version ${bootstrap_versions} {
+            if {${bootstrap_version} eq "1.24.13"} {
+                set bootstrap_dir ${go_toolchain.bootstrap_path}
+            } else {
+                set bootstrap_dir ${workpath}/go-bootstrap-${bootstrap_version}
+            }
+
+            xinstall -d ${bootstrap_dir}
+            system -W ${bootstrap_dir} \
+                "${extract.cmd} ${extract.pre_args} ${distpath}/go${bootstrap_version}.src${extract.suffix} ${extract.post_args}"
+            system -W ${bootstrap_dir}/go \
+                "${patch.cmd} -p1 < ${filespath}/patch-bootstrap-go${bootstrap_version}-snow-leopard.diff"
+        }
+    }
+
+    post-patch {
+        reinplace "s|@PREFIX@|${prefix}|g" \
+            ${worksrcpath}/src/runtime/sys_darwin.go \
+            ${worksrcpath}/src/crypto/x509/root_darwin.go
+    }
+
+    pre-build {
+        set bootstrap_root ${prefix}/lib/go-1.17
+        foreach bootstrap_version ${bootstrap_versions} {
+            if {${bootstrap_version} eq "1.24.13"} {
+                set bootstrap_dir ${go_toolchain.bootstrap_path}/go
+            } else {
+                set bootstrap_dir ${workpath}/go-bootstrap-${bootstrap_version}/go
+            }
+
+            set bootstrap_env \
+                "env PATH=${prefix}/bin:/usr/bin:/bin:/usr/sbin:/sbin GOROOT_BOOTSTRAP=${bootstrap_root} GOOS=darwin GOARCH=amd64 GOHOSTARCH=amd64 CGO_ENABLED=1 GO_EXTLINK_ENABLED=1 CC=${configure.cc} MACOSX_DEPLOYMENT_TARGET=10.6 BOOT_GO_LDFLAGS=-extldflags=${legacy_dylib} GO_LDFLAGS=-extldflags=${legacy_dylib} CGO_LDFLAGS='-g -O2 ${legacy_dylib}'"
+            system -W ${bootstrap_dir}/src "${bootstrap_env} ./make.bash"
+            set bootstrap_root ${bootstrap_dir}
+        }
+    }
+}
