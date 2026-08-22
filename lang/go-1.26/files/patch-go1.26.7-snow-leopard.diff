@@ -1,0 +1,443 @@
+--- a/src/make.bash
++++ b/src/make.bash
+@@ -191,7 +191,7 @@
+ exit 1
+ fi
+ rm -f cmd/dist/dist
+-bootstrapenv "$GOROOT_BOOTSTRAP/bin/go" build -o cmd/dist/dist ./cmd/dist
++bootstrapenv "$GOROOT_BOOTSTRAP/bin/go" build -ldflags "$BOOT_GO_LDFLAGS" -o cmd/dist/dist ./cmd/dist
+ 
+ # -e doesn't propagate out of eval, so check success by hand.
+ eval $(./cmd/dist/dist env -p || echo FAIL=true)
+--- a/src/internal/syscall/unix/pty_darwin.go
++++ b/src/internal/syscall/unix/pty_darwin.go
+@@ -6,6 +6,8 @@
+ 
+ import (
+ 	"internal/abi"
++	"sync"
++	"syscall"
+ 	"unsafe"
+ )
+ 
+@@ -31,26 +32,29 @@
+ 	return nil
+ }
+ 
+-//go:cgo_import_dynamic libc_ptsname_r ptsname_r "/usr/lib/libSystem.B.dylib"
+-func libc_ptsname_r_trampoline()
++// Snow Leopard provides ptsname but not its reentrant replacement. Keep the
++// returned static buffer locked until its contents have been copied into Go.
++var ptsnameLock sync.Mutex
+ 
++//go:cgo_import_dynamic libc_ptsname ptsname "/usr/lib/libSystem.B.dylib"
++func libc_ptsname_trampoline()
++
+ func Ptsname(fd int) (string, error) {
+-	buf := make([]byte, 256)
+-	_, _, errno := syscall_syscall6(abi.FuncPCABI0(libc_ptsname_r_trampoline),
+-		uintptr(fd),
+-		uintptr(unsafe.Pointer(&buf[0])),
+-		uintptr(len(buf)-1),
+-		0, 0, 0)
++	ptsnameLock.Lock()
++	defer ptsnameLock.Unlock()
++
++	p, _, errno := syscall_syscall6(abi.FuncPCABI0(libc_ptsname_trampoline),
++		uintptr(fd), 0, 0, 0, 0, 0)
+ 	if errno != 0 {
+ 		return "", errno
+ 	}
++	buf := (*[256]byte)(unsafe.Pointer(p))[:]
+ 	for i, c := range buf {
+ 		if c == 0 {
+-			buf = buf[:i]
+-			break
++			return string(buf[:i]), nil
+ 		}
+ 	}
+-	return string(buf), nil
++	return "", syscall.ENAMETOOLONG
+ }
+ 
+ //go:cgo_import_dynamic libc_posix_openpt posix_openpt "/usr/lib/libSystem.B.dylib"
+--- a/src/internal/syscall/unix/asm_darwin.s
++++ b/src/internal/syscall/unix/asm_darwin.s
+@@ -14,7 +14,7 @@
+ TEXT ·libresolv_res_9_nsearch_trampoline(SB),NOSPLIT,$0-0; JMP libresolv_res_9_nsearch(SB)
+ TEXT ·libc_grantpt_trampoline(SB),NOSPLIT,$0-0; JMP libc_grantpt(SB)
+ TEXT ·libc_unlockpt_trampoline(SB),NOSPLIT,$0-0; JMP libc_unlockpt(SB)
+-TEXT ·libc_ptsname_r_trampoline(SB),NOSPLIT,$0-0; JMP libc_ptsname_r(SB)
++TEXT ·libc_ptsname_trampoline(SB),NOSPLIT,$0-0; JMP libc_ptsname(SB)
+ TEXT ·libc_posix_openpt_trampoline(SB),NOSPLIT,$0-0; JMP libc_posix_openpt(SB)
+ TEXT ·libc_getgrouplist_trampoline(SB),NOSPLIT,$0-0; JMP libc_getgrouplist(SB)
+ TEXT ·libc_getpwnam_r_trampoline(SB),NOSPLIT,$0-0; JMP libc_getpwnam_r(SB)
+--- a/src/cmd/dist/buildtool.go
++++ b/src/cmd/dist/buildtool.go
+@@ -247,6 +247,9 @@
+ 		"install",
+ 		"-tags=math_big_pure_go compiler_bootstrap purego",
+ 	}
++	if goldflags != "" {
++		cmd = append(cmd, "-ldflags=all="+goldflags)
++	}
+	if vflag > 0 {
+		cmd = append(cmd, "-v")
+	}
+--- a/src/cmd/link/internal/ld/sym.go
++++ b/src/cmd/link/internal/ld/sym.go
+@@ -100,14 +100,14 @@
+ 			log.Fatalf("unknown thread-local storage offset for darwin/%s", ctxt.Arch.Name)
+ 
+ 			/*
+-			 * For x86, Apple has reserved a slot in the TLS for Go. See issue 23617.
+-			 * That slot is at offset 0x30 on amd64.
+-			 * The slot will hold the G pointer.
+-			 * These constants should match those in runtime/sys_darwin_amd64.s
+-			 * and runtime/cgo/gcc_darwin_amd64.c.
++			 * Snow Leopard predates Apple's reserved TLS slot for Go. Its amd64
++			 * pthread TLS starts at 0x60, and the key reserved by runtime/cgo is
++			 * at index 0x108, giving an offset of 0x8a0 from GS.
++			 * This constant must match runtime/sys_darwin_amd64.s and
++			 * runtime/cgo/gcc_darwin_amd64.c.
+ 			 */
+ 		case sys.AMD64:
+-			ctxt.Tlsoffset = 0x30
++			ctxt.Tlsoffset = 0x8a0
+ 
+ 		case sys.ARM64:
+ 			ctxt.Tlsoffset = 0 // dummy value, not needed
+--- a/src/runtime/cgo/gcc_darwin_amd64.c
++++ b/src/runtime/cgo/gcc_darwin_amd64.c
+@@ -10,12 +10,50 @@
+ 
+ static void* threadentry(void*);
+ static void (*setg_gcc)(void*);
++static pthread_key_t snow_g_key;
+ 
++#define snow_g_magic ((void*)0x23581321345589ULL)
++
++static void
++inittls(void)
++{
++	void *x;
++	pthread_key_t tofree[128], k;
++	int i, ntofree;
++
++	/*
++	 * Snow Leopard's amd64 pthread TLS starts at GS:0x60. Reserve the
++	 * key whose value is stored at GS:0x8a0, the layout used by Go 1.4.3.
++	 */
++	ntofree = 0;
++	for (;;) {
++		if (pthread_key_create(&k, nil) != 0) {
++			fprintf(stderr, "runtime/cgo: pthread_key_create failed\n");
++			abort();
++		}
++		pthread_setspecific(k, snow_g_magic);
++		asm volatile("movq %%gs:0x8a0, %0" : "=r"(x));
++		pthread_setspecific(k, nil);
++		if (x == snow_g_magic) {
++			snow_g_key = k;
++			break;
++		}
++		if (ntofree >= nelem(tofree)) {
++			fprintf(stderr, "runtime/cgo: could not reserve Snow Leopard TLS slot\n");
++			abort();
++		}
++		tofree[ntofree++] = k;
++	}
++	for (i = 0; i < ntofree; i++)
++		pthread_key_delete(tofree[i]);
++}
++
+ void
+ x_cgo_init(G *g, void (*setg)(void*), void **tlsg, void **tlsbase)
+ {
+ 	setg_gcc = setg;
+ 	_cgo_set_stacklo(g, NULL);
++	inittls();
+ }
+ 
+ 
+@@ -56,6 +94,7 @@
+ 	ts = *(ThreadStart*)v;
+ 	free(v);
+ 
++	pthread_setspecific(snow_g_key, (void*)ts.g);
+ 	crosscall1(ts.fn, setg_gcc, (void*)ts.g);
+ 	return nil;
+ }
+--- a/src/crypto/x509/root_darwin.go
++++ b/src/crypto/x509/root_darwin.go
+@@ -8,6 +8,7 @@
+ 	"crypto/x509/internal/macos"
+ 	"errors"
+ 	"fmt"
++	"os"
+ )
+ 
+ func (c *Certificate) systemVerify(opts *VerifyOptions) (chains [][]*Certificate, err error) {
+@@ -127,5 +128,29 @@
+ }
+ 
+ func loadSystemRoots() (*CertPool, error) {
+-	return &CertPool{systemPool: true}, nil
++	// Snow Leopard's frozen trust store cannot validate current public roots.
++	// Use the MacPorts-managed CA bundle while preserving SSL_CERT_FILE.
++	files := []string{"@PREFIX@/etc/openssl/cert.pem"}
++	if file := os.Getenv("SSL_CERT_FILE"); file != "" {
++		files = []string{file}
++	}
++
++	var firstErr error
++	for _, file := range files {
++		data, err := os.ReadFile(file)
++		if err != nil {
++			if firstErr == nil {
++				firstErr = err
++			}
++			continue
++		}
++		roots := NewCertPool()
++		if roots.AppendCertsFromPEM(data) {
++			return roots, nil
++		}
++		if firstErr == nil {
++			firstErr = errors.New("x509: system root bundle contains no certificates")
++		}
++	}
++	return nil, firstErr
+ }
+--- a/src/crypto/x509/internal/macos/security.go
++++ b/src/crypto/x509/internal/macos/security.go
+@@ -13,6 +13,19 @@
+ 	"unsafe"
+ )
+ 
++type SecTrustResultType int32
++
++const (
++	SecTrustResultInvalid SecTrustResultType = iota
++	SecTrustResultProceed
++	SecTrustResultConfirm
++	SecTrustResultDeny
++	SecTrustResultUnspecified
++	SecTrustResultRecoverableTrustFailure
++	SecTrustResultFatalTrustFailure
++	SecTrustResultOtherError
++)
++
+ // Security.framework linker flags for the external linker. See Issue 42459.
+ //
+ //go:cgo_ldflag "-framework"
+@@ -105,22 +118,20 @@
+ }
+ func x509_SecTrustEvaluate_trampoline()
+ 
+-//go:cgo_import_dynamic x509_SecTrustEvaluateWithError SecTrustEvaluateWithError "/System/Library/Frameworks/Security.framework/Versions/A/Security"
+-
+ func SecTrustEvaluateWithError(trustObj CFRef) (int, error) {
+-	var errRef CFRef
+-	ret := syscall(abi.FuncPCABI0(x509_SecTrustEvaluateWithError_trampoline), uintptr(trustObj), uintptr(unsafe.Pointer(&errRef)), 0, 0, 0, 0)
+-	if int32(ret) != 1 {
+-		errStr := CFErrorCopyDescription(errRef)
+-		err := errors.New(CFStringToString(errStr))
+-		errCode := CFErrorGetCode(errRef)
+-		CFRelease(errRef)
+-		CFRelease(errStr)
+-		return errCode, err
++	result, err := SecTrustEvaluate(trustObj)
++	if err != nil {
++		return 0, err
+ 	}
+-	return 0, nil
++	switch SecTrustResultType(result) {
++	case SecTrustResultProceed, SecTrustResultUnspecified:
++		return 0, nil
++	case SecTrustResultDeny:
++		return ErrSecNotTrusted, errors.New("certificate rejected by system trust settings")
++	default:
++		return ErrSecNotTrusted, errors.New("certificate chain is not trusted")
++	}
+ }
+-func x509_SecTrustEvaluateWithError_trampoline()
+ 
+ //go:cgo_import_dynamic x509_SecCertificateCopyData SecCertificateCopyData "/System/Library/Frameworks/Security.framework/Versions/A/Security"
+ 
+@@ -135,13 +146,21 @@
+ }
+ func x509_SecCertificateCopyData_trampoline()
+ 
+-//go:cgo_import_dynamic x509_SecTrustCopyCertificateChain SecTrustCopyCertificateChain "/System/Library/Frameworks/Security.framework/Versions/A/Security"
++//go:cgo_import_dynamic x509_SecTrustGetCertificateCount SecTrustGetCertificateCount "/System/Library/Frameworks/Security.framework/Versions/A/Security"
++//go:cgo_import_dynamic x509_SecTrustGetCertificateAtIndex SecTrustGetCertificateAtIndex "/System/Library/Frameworks/Security.framework/Versions/A/Security"
+ 
+ func SecTrustCopyCertificateChain(trustObj CFRef) (CFRef, error) {
+-	ret := syscall(abi.FuncPCABI0(x509_SecTrustCopyCertificateChain_trampoline), uintptr(trustObj), 0, 0, 0, 0, 0)
+-	if ret == 0 {
+-		return 0, OSStatus{"SecTrustCopyCertificateChain", int32(ret)}
++	chain := CFArrayCreateMutable()
++	count := syscall(abi.FuncPCABI0(x509_SecTrustGetCertificateCount_trampoline), uintptr(trustObj), 0, 0, 0, 0, 0)
++	for i := uintptr(0); i < count; i++ {
++		cert := syscall(abi.FuncPCABI0(x509_SecTrustGetCertificateAtIndex_trampoline), uintptr(trustObj), i, 0, 0, 0, 0)
++		if cert == 0 {
++			CFRelease(chain)
++			return 0, OSStatus{"SecTrustGetCertificateAtIndex", 0}
++		}
++		CFArrayAppendValue(chain, CFRef(cert))
+ 	}
+-	return CFRef(ret), nil
++	return chain, nil
+ }
+-func x509_SecTrustCopyCertificateChain_trampoline()
++func x509_SecTrustGetCertificateCount_trampoline()
++func x509_SecTrustGetCertificateAtIndex_trampoline()
+--- a/src/crypto/x509/internal/macos/security.s
++++ b/src/crypto/x509/internal/macos/security.s
+@@ -19,9 +19,9 @@
+ 	JMP x509_SecTrustSetVerifyDate(SB)
+ TEXT ·x509_SecTrustEvaluate_trampoline(SB),NOSPLIT,$0-0
+ 	JMP x509_SecTrustEvaluate(SB)
+-TEXT ·x509_SecTrustEvaluateWithError_trampoline(SB),NOSPLIT,$0-0
+-	JMP x509_SecTrustEvaluateWithError(SB)
+ TEXT ·x509_SecCertificateCopyData_trampoline(SB),NOSPLIT,$0-0
+ 	JMP x509_SecCertificateCopyData(SB)
+-TEXT ·x509_SecTrustCopyCertificateChain_trampoline(SB),NOSPLIT,$0-0
+-	JMP x509_SecTrustCopyCertificateChain(SB)
++TEXT ·x509_SecTrustGetCertificateCount_trampoline(SB),NOSPLIT,$0-0
++	JMP x509_SecTrustGetCertificateCount(SB)
++TEXT ·x509_SecTrustGetCertificateAtIndex_trampoline(SB),NOSPLIT,$0-0
++	JMP x509_SecTrustGetCertificateAtIndex(SB)
+--- a/src/syscall/zerrors_darwin_amd64.go
++++ b/src/syscall/zerrors_darwin_amd64.go
+@@ -230,7 +230,7 @@
+ 	F_ALLOCATECONTIG                  = 0x2
+ 	F_CHKCLEAN                        = 0x29
+ 	F_DUPFD                           = 0x0
+-	F_DUPFD_CLOEXEC                   = 0x43
++	F_DUPFD_CLOEXEC                   = 0x0
+ 	F_FLUSH_DATA                      = 0x28
+ 	F_FREEZE_FS                       = 0x35
+ 	F_FULLFSYNC                       = 0x33
+--- a/src/runtime/os_darwin.go
++++ b/src/runtime/os_darwin.go
+@@ -152,7 +152,6 @@
+ 	numCPUStartup = getCPUCount()
+ 	physPageSize = getPageSize()
+ 
+-	osinit_hack()
+ }
+ 
+ func sysctlbynameInt32(name []byte) (int32, int32) {
+@@ -210,6 +209,10 @@
+ 
+ //go:nosplit
+ func readRandom(r []byte) int {
++	// Snow Leopard's arc4random_buf lazily opens and retains /dev/urandom.
++	// Fill closed standard descriptors before it can claim one; checkfds is a
++	// no-op for archives and libraries.
++	checkfds()
+ 	arc4random_buf(unsafe.Pointer(&r[0]), int32(len(r)))
+ 	return len(r)
+ }
+--- a/src/runtime/sys_darwin.go
++++ b/src/runtime/sys_darwin.go
+@@ -184,14 +184,6 @@
+ // some future version of macOS, then we can remove this awful code.
+ //
+ //go:nosplit
+-func osinit_hack() {
+-	if GOOS == "darwin" { // not ios
+-		libcCall(unsafe.Pointer(abi.FuncPCABI0(osinit_hack_trampoline)), nil)
+-	}
+-	return
+-}
+-func osinit_hack_trampoline()
+-
+ // mmap is used to do low-level memory allocation via mmap. Don't allow stack
+ // splits, since this function (used by sysAlloc) is called in a lot of low-level
+ // parts of the runtime and callers often assume it won't acquire any locks.
+@@ -643,7 +635,6 @@
+ //go:cgo_import_dynamic libc_pthread_cond_signal pthread_cond_signal "/usr/lib/libSystem.B.dylib"
+ //go:cgo_import_dynamic libc_arc4random_buf arc4random_buf "/usr/lib/libSystem.B.dylib"
+ 
+-//go:cgo_import_dynamic libc_notify_is_valid_token notify_is_valid_token "/usr/lib/libSystem.B.dylib"
+-//go:cgo_import_dynamic libc_xpc_date_create_from_current xpc_date_create_from_current "/usr/lib/libSystem.B.dylib"
+-
++//go:cgo_ldflag "@PREFIX@/lib/libMacportsLegacySupport.dylib"
++
+ //go:cgo_import_dynamic libc_issetugid issetugid "/usr/lib/libSystem.B.dylib"
+--- a/src/runtime/sys_darwin_amd64.s
++++ b/src/runtime/sys_darwin_amd64.s
+@@ -395,7 +395,7 @@
+ 
+ 	// Initialize TLS entry.
+ 	// See cmd/link/internal/ld/sym.go:computeTLSOffset.
+-	MOVQ	DX, 0x30(GS)
++	MOVQ	DX, 0x8a0(GS)
+ 
+ 	CALL	runtime·mstart(SB)
+ 
+@@ -492,12 +492,6 @@
+ 	MOVQ	8(DI), SI	// arg 2 sig
+ 	MOVQ	0(DI), DI	// arg 1 thread
+ 	CALL	libc_pthread_kill(SB)
+-	RET
+-
+-TEXT runtime·osinit_hack_trampoline(SB),NOSPLIT,$0
+-	MOVQ	$0, DI	// arg 1 val
+-	CALL	libc_notify_is_valid_token(SB)
+-	CALL	libc_xpc_date_create_from_current(SB)
+ 	RET
+ 
+ TEXT runtime·arc4random_buf_trampoline(SB),NOSPLIT,$0
+--- a/src/internal/buildcfg/cfg.go
++++ b/src/internal/buildcfg/cfg.go
+@@ -357,8 +357,18 @@ func gowasm() (f gowasmFeatures) {
+ 	return
+ }
+ 
+ func Getgoextlinkenabled() string {
+-	return envOr("GO_EXTLINK_ENABLED", defaultGO_EXTLINK_ENABLED)
++	if enabled := os.Getenv("GO_EXTLINK_ENABLED"); enabled != "" {
++		return enabled
++	}
++	if GOOS != defaultGOOS || GOARCH != defaultGOARCH {
++		// This Snow Leopard toolchain is built with external linking enabled
++		// so native programs can use MacPorts Legacy Support. That host-only
++		// default must not send pure-Go cross-compiled objects to Darwin's
++		// external linker.
++		return ""
++	}
++	return defaultGO_EXTLINK_ENABLED
+ }
+ 
+ func toolTags() []string {
+--- a/src/cmd/dist/buildgo.go
++++ b/src/cmd/dist/buildgo.go
+@@ -43,3 +43,24 @@
+ // but we also write cmd/cgo/zdefaultcc.go
+ func mkzdefaultcc(dir, file string) {
++	// Keep the installed compiler name executable by tools which do not split
++	// command strings; the wrapper also supplies Snow's compatibility library.
++	// Restore dist's build-time compiler after writing each generated file so
++	// bootstrap linking does not try to execute the not-yet-installed wrapper.
++	buildCC, hadBuildCC := defaultcc["darwin/amd64"]
++	buildCXX, hadBuildCXX := defaultcxx["darwin/amd64"]
++	defaultcc["darwin/amd64"] = "@PREFIX@/libexec/go-1.26/clang"
++	defaultcxx["darwin/amd64"] = "@PREFIX@/libexec/go-1.26/clang++"
++	defer func() {
++		if hadBuildCC {
++			defaultcc["darwin/amd64"] = buildCC
++		} else {
++			delete(defaultcc, "darwin/amd64")
++		}
++		if hadBuildCXX {
++			defaultcxx["darwin/amd64"] = buildCXX
++		} else {
++			delete(defaultcxx, "darwin/amd64")
++		}
++	}()
++
+ 	if strings.Contains(file, filepath.FromSlash("go/internal/cfg")) {

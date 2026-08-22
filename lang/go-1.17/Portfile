@@ -9,7 +9,7 @@ legacysupport.newest_darwin_requires_legacy 16
 
 name                go-1.17
 version             1.17.13
-revision            1
+revision            2
 categories          lang
 license             BSD
 
@@ -33,11 +33,10 @@ homepage            https://go.dev
 # MacPorts builds 1.17.13 from source instead, where legacysupport supplies
 # what these systems lack, and this port carries that forward.
 #
-# The range is bounded at both ends. From 10.13 onwards a newer Go is
-# available, and a modern toolchain building this release is untested. Below
-# 10.7 it cannot be built at all: on 10.6 the system dsymutil aborts on the
-# debug information Go's linker emits, failing the final link. The main `go`
-# port has never produced a 10.6 x86_64 build either.
+# The range is bounded at its upper end. From 10.13 onwards a newer Go is
+# available, and a modern toolchain building this release is untested. On
+# 10.6, dsymutil cannot read the Go linker's DWARF, so that optional debug
+# companion step is skipped while the executable itself retains its symbols.
 platforms           "darwin >= [go_toolchain.min_darwin 1.17] < 17"
 
 # Go dropped darwin/386 in 1.15, so no toolchain here is built for it and no
@@ -136,7 +135,8 @@ if {${os.platform} eq "darwin" \
 
 if {${os.platform} eq "darwin" && ${os.major} == 10} {
     # The branch https://github.com/catap/go/tree/macos-10.6
-    patchfiles-append   patch-macOS-10.6.diff
+    patchfiles-append   patch-macOS-10.6.diff \
+                        patch-cmd-link-skip-dsymutil-10.6.diff
 }
 
 post-build {

@@ -1,0 +1,32 @@
+--- a/src/syscall/exec_libc2.go
++++ b/src/syscall/exec_libc2.go
+@@ -197,5 +197,6 @@
+-			_, _, err1 = rawSyscall(dupTrampoline, uintptr(pipe), uintptr(nextfd), 0)
++			r1, _, err1 = rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(pipe), F_DUPFD, uintptr(nextfd))
+ 			if err1 != 0 {
+ 				goto childerror
+ 			}
++			nextfd = int(r1)
+ 			_, _, err1 = rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(nextfd), F_SETFD, FD_CLOEXEC)
+@@ -217,5 +218,6 @@
+-				_, _, err1 = rawSyscall(dupTrampoline, uintptr(fd[i]), uintptr(nextfd), 0)
++				r1, _, err1 = rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(fd[i]), F_DUPFD, uintptr(nextfd))
+ 				if err1 != 0 {
+ 					goto childerror
+ 				}
++				nextfd = int(r1)
+ 				_, _, err1 = rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(nextfd), F_SETFD, FD_CLOEXEC)
+@@ -242,3 +244,10 @@
+-		// The new fd is created NOT close-on-exec,
+-		// which is exactly what we want.
+-		_, _, err1 = rawSyscall(abi.FuncPCABI0(libc_dup2_trampoline), uintptr(fd[i]), uintptr(i), 0)
++		// Snow Leopard's dup2 can block forever while atomically closing an
++		// occupied target after fork. Pass 1 ensures that closing i cannot
++		// destroy a descriptor needed later, and F_DUPFD must therefore return
++		// exactly i with its close-on-exec flag clear.
++		rawSyscall(abi.FuncPCABI0(libc_close_trampoline), uintptr(i), 0, 0)
++		r1, _, err1 = rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(fd[i]), F_DUPFD, uintptr(i))
++		if err1 == 0 && int(r1) != i {
++			rawSyscall(abi.FuncPCABI0(libc_close_trampoline), r1, 0, 0)
++			err1 = EINVAL
++		}

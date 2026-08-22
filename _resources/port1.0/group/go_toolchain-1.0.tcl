@@ -159,7 +159,7 @@
 # An entry is needed for any series that has a port, and for any series that
 # is the newest runnable on some version of macOS. 1.17 is not established by
 # the imports above; it and 1.27 are noted below.
-set go_toolchain.min_darwin(1.17)   11  ;# 10.7  Lion          (see below)
+set go_toolchain.min_darwin(1.17)   10  ;# 10.6  Snow Leopard  (see below)
 set go_toolchain.min_darwin(1.18)   17  ;# 10.13 High Sierra
 set go_toolchain.min_darwin(1.19)   17  ;# 10.13 High Sierra
 set go_toolchain.min_darwin(1.20)   17  ;# 10.13 High Sierra
@@ -191,9 +191,9 @@ set go_toolchain.min_darwin(1.27)   21  ;# 12    Monterey     (see below)
 
 # 1.17 is not a load-time limit but MacPorts' own. Upstream supports 10.13 and
 # ships no binary that runs below it; MacPorts builds 1.17.13 from source with
-# legacysupport, which is what makes any Go available on older systems. 10.7
-# is the limit of that: 10.6 cannot build it, because its dsymutil aborts on
-# the debug information Go's linker emits. See lang/go-1.17.
+# legacysupport, which is what makes any Go available on older systems. On
+# 10.6, its dsymutil step is skipped because that tool cannot read the Go
+# linker's DWARF. See lang/go-1.17.
 #
 # 1.27 is below upstream's floor of 13 Ventura. Its imports are those of 1.25
 # and 1.26, the newest being SecTrustCopyCertificateChain, which macOS 12
@@ -245,6 +245,11 @@ proc go_toolchain.oldest_packaged {} {
         }
     }
     return ${oldest}
+}
+
+# The modern toolchain carried by the dedicated Snow Leopard backport.
+proc go_toolchain.snow_leopard {} {
+    return 1.26
 }
 
 # The oldest darwin major version on which any packaged Go runs. Below this no
@@ -448,7 +453,11 @@ proc go_toolchain.satisfies {minimum} {
 
 options go_toolchain.version go_toolchain.minor go_toolchain.label \
         go_toolchain.goroot_final go_toolchain.suffix \
-        go_toolchain.bootstrap_path
+        go_toolchain.bootstrap_path go_toolchain.bootstrap_from_source
+
+# A port may supply a source-built bootstrap when upstream's binary cannot run
+# on the target. It must populate bootstrap_path/go before the build phase.
+default go_toolchain.bootstrap_from_source no
 
 # Configure this Portfile as a versioned Go toolchain port.
 #
@@ -463,7 +472,7 @@ proc go_toolchain.setup {go_version {label ""}} {
            go_toolchain.packaged \
            go_toolchain.version go_toolchain.minor go_toolchain.label \
            go_toolchain.goroot_final go_toolchain.suffix \
-           go_toolchain.bootstrap_path
+           go_toolchain.bootstrap_path go_toolchain.bootstrap_from_source
 
     set minor [go_toolchain._minor ${go_version}]
     if {${label} eq ""} {
@@ -532,14 +541,16 @@ proc go_toolchain.setup {go_version {label ""}} {
         default { set goarch {} }
     }
 
-    # Bootstrap from the official prebuilt toolchain of the same release. Its
-    # own minimum macOS version is never newer than that release's floor, so it
-    # runs anywhere this port is allowed to build.
-    switch ${configure.build_arch} {
-        arm64   { set bootstrap_dist go${go_version}.darwin-arm64${extract.suffix} }
-        default { set bootstrap_dist go${go_version}.darwin-amd64${extract.suffix} }
+    if {![tbool go_toolchain.bootstrap_from_source]} {
+        # Bootstrap from the official prebuilt toolchain of the same release.
+        # A port may instead prepare a source-built bootstrap above when the
+        # official binary cannot run on its target.
+        switch ${configure.build_arch} {
+            arm64   { set bootstrap_dist go${go_version}.darwin-arm64${extract.suffix} }
+            default { set bootstrap_dist go${go_version}.darwin-amd64${extract.suffix} }
+        }
+        distfiles-append ${bootstrap_dist}
     }
-    distfiles-append    ${bootstrap_dist}
 
     build.env           GOROOT=${worksrcpath} \
                         GOARCH=${goarch} \
@@ -548,10 +559,12 @@ proc go_toolchain.setup {go_version {label ""}} {
                         GOROOT_BOOTSTRAP=${go_toolchain.bootstrap_path}/go \
                         CC=[option configure.cc]
 
-    post-extract {
-        xinstall -d ${go_toolchain.bootstrap_path}
-        system -W ${go_toolchain.bootstrap_path} \
-            "${extract.cmd} ${extract.pre_args} ${distpath}/[go_toolchain._bootstrap_dist] ${extract.post_args}"
+    if {![tbool go_toolchain.bootstrap_from_source]} {
+        post-extract {
+            xinstall -d ${go_toolchain.bootstrap_path}
+            system -W ${go_toolchain.bootstrap_path} \
+                "${extract.cmd} ${extract.pre_args} ${distpath}/[go_toolchain._bootstrap_dist] ${extract.post_args}"
+        }
     }
 
     post-build {

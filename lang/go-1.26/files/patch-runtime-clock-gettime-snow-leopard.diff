@@ -1,0 +1,5 @@
+--- a/src/runtime/sys_darwin.go
++++ b/src/runtime/sys_darwin.go
+@@ -576 +576 @@
+-//go:cgo_import_dynamic libc_clock_gettime clock_gettime "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_clock_gettime clock_gettime "@PREFIX@/lib/libMacportsLegacySupport.dylib"

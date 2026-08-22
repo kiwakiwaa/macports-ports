@@ -1,0 +1,5 @@
+--- a/src/syscall/syscall_darwin.go
++++ b/src/syscall/syscall_darwin.go
+@@ -239 +239 @@
+-//go:cgo_import_dynamic libc_fdopendir fdopendir "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_fdopendir fdopendir "@PREFIX@/lib/libMacportsLegacySupport.dylib"

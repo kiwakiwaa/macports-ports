@@ -1,0 +1,13 @@
+#!/bin/sh
+link=no
+compile=no
+for arg in "$@"; do
+    case ${arg} in
+        -o) link=yes ;;
+        -c|-E|-S) compile=yes ;;
+    esac
+done
+if test ${link} = yes && test ${compile} = no; then
+    exec @PREFIX@/bin/clang++-mp-11 -B@PREFIX@/bin "$@" -Wl,-bind_at_load -L@PREFIX@/lib -lMacportsLegacySupport
+fi
+exec @PREFIX@/bin/clang++-mp-11 -B@PREFIX@/bin "$@"

@@ -1,0 +1,16 @@
+--- a/src/internal/testenv/testenv.go
++++ b/src/internal/testenv/testenv.go
+@@ -527,6 +527,13 @@ func MustHaveCGO(t testing.TB) {
+ // CPUProfilingBroken returns true if CPU profiling has known issues on this
+ // platform.
+ func CPUProfilingBroken() bool {
++	if runtime.GOOS == "darwin" {
++		// Snow Leopard only provides process-wide ITIMER_PROF timers. Their
++		// SIGPROF signals are not reliably delivered to the thread consuming
++		// CPU, and Snow Leopard has no timer_create API for targeting it.
++		return true
++	}
++
+ 	switch runtime.GOOS {
+ 	case "plan9":
+ 		// Profiling unimplemented.

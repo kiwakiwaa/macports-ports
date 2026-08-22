@@ -41,6 +41,12 @@ long_description    \
 # See https://trac.macports.org/ticket/73086.
 set go_wrapped      [go_toolchain.wrapped]
 
+if {${os.platform} eq "darwin" && ${os.major} == 10} {
+    # Go 1.26 is source-bootstrapped and patched specifically for Snow
+    # Leopard. No upstream prebuilt release can serve as the generic floor.
+    set go_wrapped  [go_toolchain.snow_leopard]
+}
+
 if {${go_wrapped} eq ""} {
     # Below every floor MacPorts packages. The platforms line excludes these
     # systems; this only keeps the Portfile parseable when it is read there.
@@ -53,10 +59,12 @@ if {${go_wrapped} eq ""} {
 # step with the toolchain Portfiles.
 version             ${go_wrapped}
 
-# Older than this there is no Go release MacPorts can provide. 10.6 in
-# particular cannot build one: its dsymutil aborts on the debug information
-# Go's linker emits. See lang/go-1.17.
-platforms           "darwin >= [go_toolchain.floor]"
+# Older than this there is no Go release MacPorts can provide.
+if {${os.platform} eq "darwin" && ${os.major} == 10} {
+    platforms       "darwin >= 10"
+} else {
+    platforms       "darwin >= [go_toolchain.floor]"
+}
 
 depends_lib         port:go-${go_wrapped}
 

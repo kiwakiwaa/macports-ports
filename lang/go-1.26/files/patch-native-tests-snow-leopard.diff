@@ -1,0 +1,68 @@
+--- a/src/cmd/gofmt/gofmt_unix_test.go
++++ b/src/cmd/gofmt/gofmt_unix_test.go
+@@ -27,7 +27,9 @@ func TestPermissions(t *testing.T) {
+ 	}
+ 
+ 	// Set mtime of the file in the past.
+-	past := time.Now().Add(-time.Hour)
++	// HFS+ stores timestamps with one-second precision, so use a value the
++	// filesystem can preserve before checking that a failed rewrite kept it.
++	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+ 	if err := os.Chtimes(fn, past, past); err != nil {
+ 		t.Fatal(err)
+ 	}
+--- a/src/cmd/pprof/pprof_test.go
++++ b/src/cmd/pprof/pprof_test.go
+@@ -32,6 +32,9 @@ func pprofPath(t testing.TB) string {
+ 
+ // See also runtime/pprof.cpuProfilingBroken.
+ func mustHaveCPUProfiling(t *testing.T) {
++	if testenv.CPUProfilingBroken() {
++		t.Skip("CPU profiling is unreliable on Snow Leopard")
++	}
+ 	switch runtime.GOOS {
+ 	case "plan9":
+ 		t.Skipf("skipping on %s, unimplemented", runtime.GOOS)
+--- a/src/cmd/link/internal/ld/dwarf_test.go
++++ b/src/cmd/link/internal/ld/dwarf_test.go
+@@ -1209,6 +1209,10 @@ func TestMachoIssue32233(t *testing.T) {
+ 		t.Skip("skipping; test only interesting on darwin")
+ 	}
+ 
++	// The fixture imports AppKit/NSAppearance.h, which did not exist in the
++	// Snow Leopard SDK. This tests a later macOS Objective-C DWARF feature.
++	t.Skip("NSAppearance is unavailable in the Snow Leopard SDK")
++
+ 	f := gobuildTestdata(t, "testdata/issue32233/main", DefaultOpt)
+ 	f.Close()
+ }
+@@ -1655,6 +1659,11 @@ func TestDictIndex(t *testing.T) {
+ 	// Check that variables with a parametric type have a dictionary index
+ 	// attribute and that types that are only referenced through dictionaries
+ 	// have DIEs.
++	if runtime.GOOS == "darwin" {
++		// Snow Leopard's dsymutil-87 drops the generic map DIE. Exercise the
++		// Go linker's original DWARF directly instead of postprocessing it.
++		t.Setenv("GO_EXTLINK_ENABLED", "0")
++	}
+	testenv.MustHaveGoBuild(t)
+
+	mustHaveDWARF(t)
+@@ -1662 +1671,3 @@ func TestDictIndex(t *testing.T) {
+-	t.Parallel()
++	if runtime.GOOS != "darwin" {
++		t.Parallel()
++	}
+--- a/test/nilptr.go
++++ b/test/nilptr.go
+@@ -7,8 +7,8 @@
+ // Test that the implementation catches nil ptr indirection
+ // in a large address space.
+ 
+-// Address space starts at 1<<32 on AIX and on darwin/arm64 and on windows/[amd64/arm64], so dummy is too far.
+-//go:build !aix && (!darwin || !arm64) && (!windows || (!amd64 && !arm64))
++// Address space starts at 1<<32 on AIX, Snow Leopard/amd64, darwin/arm64, and windows/[amd64/arm64], so dummy is too far.
++//go:build !aix && (!darwin || (!amd64 && !arm64)) && (!windows || (!amd64 && !arm64))
+ 
+ package main
+ 

@@ -1,0 +1,134 @@
+--- a/src/make.bash
++++ b/src/make.bash
+@@ -194,7 +194,7 @@
+ 	exit 1
+ fi
+ rm -f cmd/dist/dist
+-GOROOT="$GOROOT_BOOTSTRAP" GOOS="" GOARCH="" GO111MODULE=off GOEXPERIMENT="" GOENV=off GOFLAGS="" "$GOROOT_BOOTSTRAP/bin/go" build -o cmd/dist/dist ./cmd/dist
++GOROOT="$GOROOT_BOOTSTRAP" GOOS="" GOARCH="" GO111MODULE=off GOEXPERIMENT="" GOENV=off GOFLAGS="" "$GOROOT_BOOTSTRAP/bin/go" build -ldflags "$BOOT_GO_LDFLAGS" -o cmd/dist/dist ./cmd/dist
+ 
+ # -e doesn't propagate out of eval, so check success by hand.
+ eval $(./cmd/dist/dist env -p || echo FAIL=true)
+--- a/src/cmd/dist/buildtool.go
++++ b/src/cmd/dist/buildtool.go
+@@ -207,6 +207,9 @@
+ 		"install",
+ 		"-tags=math_big_pure_go compiler_bootstrap purego",
+ 	}
++	if goldflags != "" {
++		cmd = append(cmd, "-ldflags=all="+goldflags)
++	}
+ 	if vflag > 0 {
+ 		cmd = append(cmd, "-v")
+ 	}
+--- a/src/crypto/x509/internal/macos/security.go
++++ b/src/crypto/x509/internal/macos/security.go
+@@ -197,22 +197,20 @@
+ }
+ func x509_SecTrustGetResult_trampoline()
+ 
+-//go:cgo_import_dynamic x509_SecTrustEvaluateWithError SecTrustEvaluateWithError "/System/Library/Frameworks/Security.framework/Versions/A/Security"
+-
+ func SecTrustEvaluateWithError(trustObj CFRef) (int, error) {
+-	var errRef CFRef
+-	ret := syscall(abi.FuncPCABI0(x509_SecTrustEvaluateWithError_trampoline), uintptr(trustObj), uintptr(unsafe.Pointer(&errRef)), 0, 0, 0, 0)
+-	if int32(ret) != 1 {
+-		errStr := CFErrorCopyDescription(errRef)
+-		err := errors.New(CFStringToString(errStr))
+-		errCode := CFErrorGetCode(errRef)
+-		CFRelease(errRef)
+-		CFRelease(errStr)
+-		return errCode, err
++	result, err := SecTrustEvaluate(trustObj)
++	if err != nil {
++		return 0, err
+ 	}
+-	return 0, nil
++	switch SecTrustResultType(result) {
++	case SecTrustResultProceed, SecTrustResultUnspecified:
++		return 0, nil
++	case SecTrustResultDeny:
++		return ErrSecNotTrusted, errors.New("certificate rejected by system trust settings")
++	default:
++		return ErrSecNotTrusted, errors.New("certificate chain is not trusted")
++	}
+ }
+-func x509_SecTrustEvaluateWithError_trampoline()
+ 
+ //go:cgo_import_dynamic x509_SecTrustGetCertificateCount SecTrustGetCertificateCount "/System/Library/Frameworks/Security.framework/Versions/A/Security"
+ 
+--- a/src/crypto/x509/internal/macos/security.s
++++ b/src/crypto/x509/internal/macos/security.s
+@@ -25,8 +25,6 @@
+ 	JMP x509_SecTrustEvaluate(SB)
+ TEXT ·x509_SecTrustGetResult_trampoline(SB),NOSPLIT,$0-0
+ 	JMP x509_SecTrustGetResult(SB)
+-TEXT ·x509_SecTrustEvaluateWithError_trampoline(SB),NOSPLIT,$0-0
+-	JMP x509_SecTrustEvaluateWithError(SB)
+ TEXT ·x509_SecTrustGetCertificateCount_trampoline(SB),NOSPLIT,$0-0
+ 	JMP x509_SecTrustGetCertificateCount(SB)
+ TEXT ·x509_SecTrustGetCertificateAtIndex_trampoline(SB),NOSPLIT,$0-0
+--- a/src/syscall/zerrors_darwin_amd64.go
++++ b/src/syscall/zerrors_darwin_amd64.go
+@@ -232,7 +232,7 @@
+ 	F_ALLOCATECONTIG                  = 0x2
+ 	F_CHKCLEAN                        = 0x29
+ 	F_DUPFD                           = 0x0
+-	F_DUPFD_CLOEXEC                   = 0x43
++	F_DUPFD_CLOEXEC                   = 0x0
+ 	F_FLUSH_DATA                      = 0x28
+ 	F_FREEZE_FS                       = 0x35
+ 	F_FULLFSYNC                       = 0x33
+--- a/src/runtime/os_darwin.go
++++ b/src/runtime/os_darwin.go
+@@ -138,7 +138,6 @@
+ 	ncpu = getncpu()
+ 	physPageSize = getPageSize()
+ 
+-	osinit_hack()
+ }
+ 
+ func sysctlbynameInt32(name []byte) (int32, int32) {
+--- a/src/runtime/sys_darwin.go
++++ b/src/runtime/sys_darwin.go
+@@ -212,14 +212,6 @@
+ // some future version of macOS, then we can remove this awful code.
+ //
+ //go:nosplit
+-func osinit_hack() {
+-	if GOOS == "darwin" { // not ios
+-		libcCall(unsafe.Pointer(abi.FuncPCABI0(osinit_hack_trampoline)), nil)
+-	}
+-	return
+-}
+-func osinit_hack_trampoline()
+-
+ // mmap is used to do low-level memory allocation via mmap. Don't allow stack
+ // splits, since this function (used by sysAlloc) is called in a lot of low-level
+ // parts of the runtime and callers often assume it won't acquire any locks.
+@@ -602,7 +594,4 @@
+ //go:cgo_import_dynamic libc_pthread_cond_timedwait_relative_np pthread_cond_timedwait_relative_np "/usr/lib/libSystem.B.dylib"
+ //go:cgo_import_dynamic libc_pthread_cond_signal pthread_cond_signal "/usr/lib/libSystem.B.dylib"
+ 
+-//go:cgo_import_dynamic libc_notify_is_valid_token notify_is_valid_token "/usr/lib/libSystem.B.dylib"
+-//go:cgo_import_dynamic libc_xpc_date_create_from_current xpc_date_create_from_current "/usr/lib/libSystem.B.dylib"
+-
+ //go:cgo_import_dynamic libc_issetugid issetugid "/usr/lib/libSystem.B.dylib"
+--- a/src/runtime/sys_darwin_amd64.s
++++ b/src/runtime/sys_darwin_amd64.s
+@@ -607,15 +607,6 @@
+ 	POPQ	BP
+ 	RET
+ 
+-TEXT runtime·osinit_hack_trampoline(SB),NOSPLIT,$0
+-	PUSHQ	BP
+-	MOVQ	SP, BP
+-	MOVQ	$0, DI	// arg 1 val
+-	CALL	libc_notify_is_valid_token(SB)
+-	CALL	libc_xpc_date_create_from_current(SB)
+-	POPQ	BP
+-	RET
+-
+ // syscall calls a function in libc on behalf of the syscall package.
+ // syscall takes a pointer to a struct like:
+ // struct {
