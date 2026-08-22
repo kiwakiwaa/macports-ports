@@ -1,0 +1,16 @@
+--- a/src/runtime/crash_cgo_test.go
++++ b/src/runtime/crash_cgo_test.go
+@@ -93,6 +93,13 @@ func TestCgoCallbackPprof(t *testing.T) {
+ 	if runtime.GOOS == "freebsd" && race.Enabled {
+ 		t.Skipf("race + cgo freebsd not supported. See https://go.dev/issue/73788.")
+ 	}
++	if runtime.GOOS == "darwin" {
++		// Snow Leopard provides only process-wide profiling timers and
++		// consistently delivers their SIGPROF signals to other runtime
++		// threads instead of the CPU-consuming callback pthread. It has no
++		// timer_create API with which to target that thread.
++		t.Skip("Snow Leopard cannot direct CPU profile samples to cgo callback pthreads")
++	}
+ 	if testenv.CPUProfilingBroken() {
+ 		t.Skip("skipping on platform with broken profiling")
+ 	}

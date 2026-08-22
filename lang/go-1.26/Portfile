@@ -10,7 +10,7 @@ if {${snow_leopard}} {
 }
 
 go_toolchain.setup  1.26.7
-revision            6
+revision            7
 
 checksums           \
                     go1.26.7.src.tar.gz \
@@ -60,7 +60,8 @@ if {${snow_leopard}} {
     patchfiles-append       patch-go1.26.7-snow-leopard.diff \
                             patch-net-unixgram-self-send-snow-leopard.diff \
                             patch-net-tcp-keepalive-snow-leopard.diff \
-                            patch-os-signal-terminal-test-snow-leopard.diff
+                            patch-os-signal-terminal-test-snow-leopard.diff \
+                            patch-runtime-cgo-pprof-test-snow-leopard.diff
     patch.pre_args          -p1
 
     set legacy_dylib       ${prefix}/lib/libMacportsLegacySupport.dylib
