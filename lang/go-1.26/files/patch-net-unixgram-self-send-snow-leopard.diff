@@ -1,0 +1,45 @@
+--- a/src/net/unixsock_posix.go
++++ b/src/net/unixsock_posix.go
+@@ -137,7 +137,27 @@
+ 		return 0, syscall.EAFNOSUPPORT
+ 	}
+ 	sa := &syscall.SockaddrUnix{Name: addr.Name}
++	if c.isSelfUnixgram(addr) {
++		fd, err := snowLeopardUnixgramWriteFD()
++		if err != nil {
++			return 0, err
++		}
++		defer fd.Close()
++		return fd.writeTo(b, sa)
++	}
+ 	return c.fd.writeTo(b, sa)
++}
++
++func (c *UnixConn) isSelfUnixgram(addr *UnixAddr) bool {
++	local, ok := c.fd.laddr.(*UnixAddr)
++	return ok && c.fd.sotype == syscall.SOCK_DGRAM && local.Name != "" && local.Name == addr.Name
++}
++
++func snowLeopardUnixgramWriteFD() (*netFD, error) {
++	// Darwin 10 deadlocks in the kernel when an AF_UNIX datagram socket is
++	// both sender and receiver. An unbound sender preserves delivery while
++	// avoiding the recursive socket lock in uipc_send.
++	return socket(context.Background(), "unixgram", syscall.AF_UNIX, syscall.SOCK_DGRAM, 0, false, nil, nil, nil)
+ }
+ 
+ func (c *UnixConn) writeMsg(b, oob []byte, addr *UnixAddr) (n, oobn int, err error) {
+@@ -150,6 +170,14 @@
+ 			return 0, 0, syscall.EAFNOSUPPORT
+ 		}
+ 		sa = &syscall.SockaddrUnix{Name: addr.Name}
++		if c.isSelfUnixgram(addr) {
++			fd, err := snowLeopardUnixgramWriteFD()
++			if err != nil {
++				return 0, 0, err
++			}
++			defer fd.Close()
++			return fd.writeMsg(b, oob, sa)
++		}
+ 	}
+ 	return c.fd.writeMsg(b, oob, sa)
+ }

@@ -10,7 +10,7 @@ if {${snow_leopard}} {
 }
 
 go_toolchain.setup  1.26.7
-revision            3
+revision            5
 
 checksums           \
                     go1.26.7.src.tar.gz \
@@ -57,7 +57,10 @@ if {${snow_leopard}} {
                         sha256  639a6204c2486b137df1eb6e78ee3ed038f9877d0e4b5a465e796a2153f858d7 \
                         size    30802752
 
-    patchfiles-append       patch-go1.26.7-snow-leopard.diff
+    patchfiles-append       patch-go1.26.7-snow-leopard.diff \
+                            patch-net-unixgram-self-send-snow-leopard.diff \
+                            patch-net-tcp-keepalive-snow-leopard.diff \
+                            patch-os-signal-terminal-test-snow-leopard.diff
     patch.pre_args          -p1
 
     set legacy_dylib       ${prefix}/lib/libMacportsLegacySupport.dylib

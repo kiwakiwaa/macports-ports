@@ -1,0 +1,109 @@
+--- a/src/net/tcpsock.go
++++ b/src/net/tcpsock.go
+@@ -129,6 +129,10 @@
+ //
+ // Note that Solaris and its derivatives do not support setting Interval to a non-negative value
+ // and Count to a negative value, or vice-versa.
++//
++// Note that Darwin 10 supports setting Enable and Idle per socket, but Interval
++// and Count remain system-wide kernel settings. On that system those two fields
++// leave the corresponding system values unchanged.
+ type KeepAliveConfig struct {
+ 	// If Enable is true, keep-alive probes are enabled.
+ 	Enable bool
+--- a/src/net/tcpsockopt_darwin.go
++++ b/src/net/tcpsockopt_darwin.go
+@@ -37,11 +37,10 @@
+ 		return nil
+ 	}
+ 
+-	// The kernel expects seconds so round to next highest second.
+-	secs := int(roundDurationUp(d, time.Second))
+-	err := fd.pfd.SetsockoptInt(syscall.IPPROTO_TCP, sysTCP_KEEPINTVL, secs)
++	// Darwin 10 has only the system-wide net.inet.tcp.keepintvl value. Later
++	// per-socket TCP_KEEPINTVL requests fail with ENOPROTOOPT, so retain it.
+ 	runtime.KeepAlive(fd)
+-	return wrapSyscallError("setsockopt", err)
++	return nil
+ }
+ 
+ func setKeepAliveCount(fd *netFD, n int) error {
+@@ -51,7 +50,8 @@
+ 		return nil
+ 	}
+ 
+-	err := fd.pfd.SetsockoptInt(syscall.IPPROTO_TCP, sysTCP_KEEPCNT, n)
++	// Darwin 10 likewise has no per-socket TCP_KEEPCNT option. Keep the
++	// system-wide probe count rather than making KeepAliveConfig unusable.
+ 	runtime.KeepAlive(fd)
+-	return wrapSyscallError("setsockopt", err)
++	return nil
+ }
+--- a/src/net/tcpconn_keepalive_posix_test.go
++++ b/src/net/tcpconn_keepalive_posix_test.go
+@@ -21,19 +21,9 @@
+ 	if err != nil {
+ 		return
+ 	}
+-	tcpKeepAliveInterval, err := syscall.GetsockoptInt(fd, syscall.IPPROTO_TCP, syscall_TCP_KEEPINTVL)
+-	if err != nil {
+-		return
+-	}
+-	tcpKeepAliveCount, err := syscall.GetsockoptInt(fd, syscall.IPPROTO_TCP, syscall_TCP_KEEPCNT)
+-	if err != nil {
+-		return
+-	}
+ 	cfg = KeepAliveConfig{
+-		Enable:   tcpKeepAlive != 0,
+-		Idle:     time.Duration(tcpKeepAliveIdle) * time.Second,
+-		Interval: time.Duration(tcpKeepAliveInterval) * time.Second,
+-		Count:    tcpKeepAliveCount,
++		Enable: tcpKeepAlive != 0,
++		Idle:   time.Duration(tcpKeepAliveIdle) * time.Second,
+ 	}
+ 	return
+ }
+@@ -42,21 +32,9 @@
+ 	if cfg.Idle == 0 {
+ 		cfg.Idle = defaultTCPKeepAliveIdle
+ 	}
+-	if cfg.Interval == 0 {
+-		cfg.Interval = defaultTCPKeepAliveInterval
+-	}
+-	if cfg.Count == 0 {
+-		cfg.Count = defaultTCPKeepAliveCount
+-	}
+ 	if cfg.Idle == -1 {
+ 		cfg.Idle = oldCfg.Idle
+ 	}
+-	if cfg.Interval == -1 {
+-		cfg.Interval = oldCfg.Interval
+-	}
+-	if cfg.Count == -1 {
+-		cfg.Count = oldCfg.Count
+-	}
+ 
+ 	tcpKeepAlive, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE)
+ 	if err != nil {
+@@ -72,21 +50,5 @@
+ 	}
+ 	if time.Duration(tcpKeepAliveIdle)*time.Second != cfg.Idle {
+ 		t.Fatalf("TCP_KEEPIDLE: got %ds; want %v", tcpKeepAliveIdle, cfg.Idle)
+-	}
+-
+-	tcpKeepAliveInterval, err := syscall.GetsockoptInt(fd, syscall.IPPROTO_TCP, syscall_TCP_KEEPINTVL)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	if time.Duration(tcpKeepAliveInterval)*time.Second != cfg.Interval {
+-		t.Fatalf("TCP_KEEPINTVL: got %ds; want %v", tcpKeepAliveInterval, cfg.Interval)
+-	}
+-
+-	tcpKeepAliveCount, err := syscall.GetsockoptInt(fd, syscall.IPPROTO_TCP, syscall_TCP_KEEPCNT)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	if tcpKeepAliveCount != cfg.Count {
+-		t.Fatalf("TCP_KEEPCNT: got %d; want %d", tcpKeepAliveCount, cfg.Count)
+ 	}
+ }
