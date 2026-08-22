@@ -10,7 +10,7 @@ if {${snow_leopard}} {
 }
 
 go_toolchain.setup  1.26.7
-revision            5
+revision            6
 
 checksums           \
                     go1.26.7.src.tar.gz \

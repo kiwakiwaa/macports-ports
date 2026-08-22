@@ -330,6 +330,17 @@
  }
  
  func sysctlbynameInt32(name []byte) (int32, int32) {
+@@ -210,6 +209,10 @@
+ 
+ //go:nosplit
+ func readRandom(r []byte) int {
++	// Snow Leopard's arc4random_buf lazily opens and retains /dev/urandom.
++	// Fill closed standard descriptors before it can claim one; checkfds is a
++	// no-op for archives and libraries.
++	checkfds()
+ 	arc4random_buf(unsafe.Pointer(&r[0]), int32(len(r)))
+ 	return len(r)
+ }
 --- a/src/runtime/sys_darwin.go
 +++ b/src/runtime/sys_darwin.go
 @@ -184,14 +184,6 @@
