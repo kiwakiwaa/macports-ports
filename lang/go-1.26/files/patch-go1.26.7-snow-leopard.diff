@@ -392,3 +392,52 @@
  	RET
  
  TEXT runtime·arc4random_buf_trampoline(SB),NOSPLIT,$0
+--- a/src/internal/buildcfg/cfg.go
++++ b/src/internal/buildcfg/cfg.go
+@@ -357,8 +357,18 @@ func gowasm() (f gowasmFeatures) {
+ 	return
+ }
+ 
+ func Getgoextlinkenabled() string {
+-	return envOr("GO_EXTLINK_ENABLED", defaultGO_EXTLINK_ENABLED)
++	if enabled := os.Getenv("GO_EXTLINK_ENABLED"); enabled != "" {
++		return enabled
++	}
++	if GOOS != defaultGOOS || GOARCH != defaultGOARCH {
++		// This Snow Leopard toolchain is built with external linking enabled
++		// so native programs can use MacPorts Legacy Support. That host-only
++		// default must not send pure-Go cross-compiled objects to Darwin's
++		// external linker.
++		return ""
++	}
++	return defaultGO_EXTLINK_ENABLED
+ }
+ 
+ func toolTags() []string {
+--- a/src/cmd/dist/buildgo.go
++++ b/src/cmd/dist/buildgo.go
+@@ -43,3 +43,24 @@
+ // but we also write cmd/cgo/zdefaultcc.go
+ func mkzdefaultcc(dir, file string) {
++	// Keep the installed compiler name executable by tools which do not split
++	// command strings; the wrapper also supplies Snow's compatibility library.
++	// Restore dist's build-time compiler after writing each generated file so
++	// bootstrap linking does not try to execute the not-yet-installed wrapper.
++	buildCC, hadBuildCC := defaultcc["darwin/amd64"]
++	buildCXX, hadBuildCXX := defaultcxx["darwin/amd64"]
++	defaultcc["darwin/amd64"] = "@PREFIX@/libexec/go-1.26/clang"
++	defaultcxx["darwin/amd64"] = "@PREFIX@/libexec/go-1.26/clang++"
++	defer func() {
++		if hadBuildCC {
++			defaultcc["darwin/amd64"] = buildCC
++		} else {
++			delete(defaultcc, "darwin/amd64")
++		}
++		if hadBuildCXX {
++			defaultcxx["darwin/amd64"] = buildCXX
++		} else {
++			delete(defaultcxx, "darwin/amd64")
++		}
++	}()
++
+ 	if strings.Contains(file, filepath.FromSlash("go/internal/cfg")) {

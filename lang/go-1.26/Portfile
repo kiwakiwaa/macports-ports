@@ -10,7 +10,7 @@ if {${snow_leopard}} {
 }
 
 go_toolchain.setup  1.26.7
-revision            7
+revision            16
 
 checksums           \
                     go1.26.7.src.tar.gz \
@@ -37,6 +37,12 @@ if {${snow_leopard}} {
 
     depends_build-append    port:go-1.17
     depends_lib-append      port:curl-ca-bundle
+    depends_run-append      port:clang-11 \
+                            port:ld64-latest
+
+    set snow_cc             "${configure.cc} -B${prefix}/bin"
+    build.env-delete        CC=${configure.cc}
+    build.env-append        "CC=${snow_cc}"
 
     set bootstrap_versions  {1.20.14 1.22.12 1.24.13}
     foreach bootstrap_version ${bootstrap_versions} {
@@ -57,7 +63,17 @@ if {${snow_leopard}} {
                         sha256  639a6204c2486b137df1eb6e78ee3ed038f9877d0e4b5a465e796a2153f858d7 \
                         size    30802752
 
-    patchfiles-append       patch-go1.26.7-snow-leopard.diff \
+    patchfiles-append       patch-go${version}-snow-leopard.diff \
+                            patch-linker-codesign-snow-leopard.diff \
+                            patch-runtime-clock-gettime-snow-leopard.diff \
+                            patch-runtime-arc4random-snow-leopard.diff \
+                            patch-syscall-fdopendir-snow-leopard.diff \
+                            patch-syscall-at-symbols-snow-leopard.diff \
+                            patch-syscall-fd-remap-snow-leopard.diff \
+                            patch-pprof-vmmap-snow-leopard.diff \
+                            patch-x509-hybrid-pool-test-snow-leopard.diff \
+                            patch-os-filesystem-snow-leopard.diff \
+                            patch-native-tests-snow-leopard.diff \
                             patch-net-unixgram-self-send-snow-leopard.diff \
                             patch-net-tcp-keepalive-snow-leopard.diff \
                             patch-os-signal-terminal-test-snow-leopard.diff \
@@ -65,15 +81,28 @@ if {${snow_leopard}} {
     patch.pre_args          -p1
 
     set legacy_dylib       ${prefix}/lib/libMacportsLegacySupport.dylib
+    # Snow Leopard's dyld can retain its lazy-binding lock across fork. Bind
+    # bootstrap and external-link symbols eagerly before a child remaps fds.
+    set snow_extldflags    "-Wl,-bind_at_load,${legacy_dylib}"
     build.env-append       GOHOSTARCH=amd64 \
+                           GOFLAGS=-p=1 \
                            CGO_ENABLED=1 \
                            GO_EXTLINK_ENABLED=1 \
+                           DYLD_BIND_AT_LAUNCH=1 \
                            MACOSX_DEPLOYMENT_TARGET=10.6 \
-                           BOOT_GO_LDFLAGS=-extldflags=${legacy_dylib} \
-                           GO_LDFLAGS=-extldflags=${legacy_dylib} \
+                           BOOT_GO_LDFLAGS=-extldflags=${snow_extldflags} \
+                           GO_LDFLAGS=-extldflags=${snow_extldflags} \
                            "CGO_LDFLAGS=-g -O2 ${legacy_dylib}"
 
     post-extract {
+        # cmd/dist is initially linked from go-1.17's precompiled syscall
+        # archive. Rebuild that archive from a private patched GOROOT so even
+        # the first bootstrap generation avoids Snow Leopard's dup2 deadlock.
+        set initial_bootstrap_dir ${workpath}/go-bootstrap-1.17-snow
+        file copy ${prefix}/lib/go-1.17 ${initial_bootstrap_dir}
+        system -W ${initial_bootstrap_dir} \
+            "${patch.cmd} -p1 < ${filespath}/patch-bootstrap-go1.17-fd-remap-snow-leopard.diff"
+
         foreach bootstrap_version ${bootstrap_versions} {
             if {${bootstrap_version} eq "1.24.13"} {
                 set bootstrap_dir ${go_toolchain.bootstrap_path}
@@ -86,17 +115,69 @@ if {${snow_leopard}} {
                 "${extract.cmd} ${extract.pre_args} ${distpath}/go${bootstrap_version}.src${extract.suffix} ${extract.post_args}"
             system -W ${bootstrap_dir}/go \
                 "${patch.cmd} -p1 < ${filespath}/patch-bootstrap-go${bootstrap_version}-snow-leopard.diff"
+            system -W ${bootstrap_dir}/go \
+                "${patch.cmd} -p1 < ${filespath}/patch-syscall-fd-remap-snow-leopard.diff"
+            system -W ${bootstrap_dir}/go \
+                "${patch.cmd} -p1 < ${filespath}/patch-runtime-clock-gettime-snow-leopard.diff"
+            system -W ${bootstrap_dir}/go \
+                "${patch.cmd} -p1 < ${filespath}/patch-syscall-fdopendir-snow-leopard.diff"
+            if {${bootstrap_version} eq "1.24.13"} {
+                system -W ${bootstrap_dir}/go \
+                    "${patch.cmd} -p1 < ${filespath}/patch-runtime-arc4random-snow-leopard.diff"
+            }
+            reinplace "s|@PREFIX@|${prefix}|g" \
+                ${bootstrap_dir}/go/src/runtime/sys_darwin.go \
+                ${bootstrap_dir}/go/src/syscall/syscall_darwin.go
         }
     }
 
     post-patch {
+        # Apple's patch leaves .orig backups whenever a hunk applies with an
+        # offset. cmd/dist scans bootstrap-copied source broadly enough to
+        # mistake test.go.orig files for Go inputs, so discard patch debris.
+        fs-traverse backup ${worksrcpath} {
+            if {[file isfile ${backup}] && [string match "*.orig" ${backup}]} {
+                delete ${backup}
+            }
+        }
+
         reinplace "s|@PREFIX@|${prefix}|g" \
             ${worksrcpath}/src/runtime/sys_darwin.go \
-            ${worksrcpath}/src/crypto/x509/root_darwin.go
+            ${worksrcpath}/src/syscall/syscall_darwin.go \
+            ${worksrcpath}/src/syscall/zsyscall_darwin_amd64.go \
+            ${worksrcpath}/src/internal/syscall/unix/at_darwin.go \
+            ${worksrcpath}/src/internal/syscall/unix/faccessat_darwin.go \
+            ${worksrcpath}/src/crypto/x509/root_darwin.go \
+            ${worksrcpath}/src/cmd/dist/buildgo.go \
+            ${worksrcpath}/src/cmd/link/internal/ld/lib.go
+
+        # The upstream race object uses weak or optional interfaces newer than
+        # Snow Leopard. Supply its compatibility ABI as another package object.
+        system "${configure.cc} -c -arch x86_64 -mmacosx-version-min=10.6 -O2 \
+            ${filespath}/race-snow-leopard.c -o \
+            ${worksrcpath}/src/runtime/race/internal/amd64v1/race_snow_leopard.syso"
+
+        # Upstream's prebuilt race object declares macOS 10.7 despite using
+        # interfaces supplied by the Snow Leopard compatibility object above.
+        system "${configure.cc} -arch x86_64 -mmacosx-version-min=10.6 -O2 \
+            ${filespath}/patch-macho-min-version.c -o \
+            ${workpath}/patch-macho-min-version"
+        system "${workpath}/patch-macho-min-version \
+            ${worksrcpath}/src/runtime/race/internal/amd64v1/race_darwin.syso"
+    }
+
+    post-destroot {
+        xinstall -d ${destroot}${prefix}/libexec/go-1.26
+        foreach wrapper {clang clang++} {
+            xinstall -m 0755 ${filespath}/snow-${wrapper}-wrapper \
+                ${destroot}${prefix}/libexec/go-1.26/${wrapper}
+            reinplace "s|@PREFIX@|${prefix}|g" \
+                ${destroot}${prefix}/libexec/go-1.26/${wrapper}
+        }
     }
 
     pre-build {
-        set bootstrap_root ${prefix}/lib/go-1.17
+        set bootstrap_root ${workpath}/go-bootstrap-1.17-snow
         foreach bootstrap_version ${bootstrap_versions} {
             if {${bootstrap_version} eq "1.24.13"} {
                 set bootstrap_dir ${go_toolchain.bootstrap_path}/go
@@ -105,7 +186,7 @@ if {${snow_leopard}} {
             }
 
             set bootstrap_env \
-                "env PATH=${prefix}/bin:/usr/bin:/bin:/usr/sbin:/sbin GOROOT_BOOTSTRAP=${bootstrap_root} GOOS=darwin GOARCH=amd64 GOHOSTARCH=amd64 CGO_ENABLED=1 GO_EXTLINK_ENABLED=1 CC=${configure.cc} MACOSX_DEPLOYMENT_TARGET=10.6 BOOT_GO_LDFLAGS=-extldflags=${legacy_dylib} GO_LDFLAGS=-extldflags=${legacy_dylib} CGO_LDFLAGS='-g -O2 ${legacy_dylib}'"
+                "env PATH=${prefix}/bin:/usr/bin:/bin:/usr/sbin:/sbin GOROOT_BOOTSTRAP=${bootstrap_root} GOOS=darwin GOARCH=amd64 GOHOSTARCH=amd64 GOFLAGS='-a -p=1' CGO_ENABLED=1 GO_EXTLINK_ENABLED=1 DYLD_BIND_AT_LAUNCH=1 CC='${snow_cc}' MACOSX_DEPLOYMENT_TARGET=10.6 BOOT_GO_LDFLAGS=-extldflags=${snow_extldflags} GO_LDFLAGS=-extldflags=${snow_extldflags} CGO_LDFLAGS='-g -O2 ${legacy_dylib}'"
             system -W ${bootstrap_dir}/src "${bootstrap_env} ./make.bash"
             set bootstrap_root ${bootstrap_dir}
         }

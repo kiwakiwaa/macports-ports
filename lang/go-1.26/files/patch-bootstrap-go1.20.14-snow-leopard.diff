@@ -132,4 +132,3 @@
  // syscall calls a function in libc on behalf of the syscall package.
  // syscall takes a pointer to a struct like:
  // struct {
-

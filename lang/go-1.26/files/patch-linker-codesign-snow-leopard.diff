@@ -1,0 +1,18 @@
+--- a/src/cmd/link/internal/ld/lib.go
++++ b/src/cmd/link/internal/ld/lib.go
+@@ -1954,6 +1954,15 @@ func (ctxt *Link) hostlink() {
+ 		}
+ 	}
+ 
++	if ctxt.IsDarwin() {
++		// Xcode 4.2's codesign_allocate cannot parse LC_DATA_IN_CODE. The
++		// command is optional metadata, so keep Snow Leopard binaries signable
++		// by asking the external linker not to emit it. Eager binding also
++		// prevents dyld's inherited lock from deadlocking the post-fork child
++		// when its first libc call resolves a lazy symbol.
++		argv = append(argv, "-B@PREFIX@/bin", "-Wl,-no_data_in_code_info", "-Wl,-bind_at_load", "@PREFIX@/lib/libMacportsLegacySupport.dylib")
++	}
++
+ 	for _, p := range flagExtldflags {
+ 		argv = append(argv, p)
+ 		checkStatic(p)

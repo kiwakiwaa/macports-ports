@@ -1,0 +1,140 @@
+--- a/src/os/file_posix.go
++++ b/src/os/file_posix.go
+@@ -178,5 +178,20 @@ func (f *File) Sync() error {
+ // If there is an error, it will be of type [*PathError].
+ func Chtimes(name string, atime time.Time, mtime time.Time) error {
++	if runtime.GOOS == "darwin" && (atime.IsZero() || mtime.IsZero()) {
++		// The Snow Leopard setattrlist implementation used by MacPorts
++		// Legacy Support does not apply an access-time-only update. Resolve
++		// omitted values here and submit both timestamps explicitly.
++		info, err := Stat(name)
++		if err != nil {
++			return &PathError{Op: "chtimes", Path: name, Err: underlyingError(err)}
++		}
++		if atime.IsZero() {
++			atime = snowLeopardAtime(info)
++		}
++		if mtime.IsZero() {
++			mtime = info.ModTime()
++		}
++	}
+ 	utimes := chtimesUtimes(atime, mtime)
+ 	if e := syscall.UtimesNano(fixLongPath(name), utimes[0:]); e != nil {
+ 		return &PathError{Op: "chtimes", Path: name, Err: e}
+--- a/src/os/root_openat.go
++++ b/src/os/root_openat.go
+@@ -98,6 +98,21 @@ func rootLchown(r *Root, name string, uid, gid int) error {
+ 
+ func rootChtimes(r *Root, name string, atime time.Time, mtime time.Time) error {
+ 	_, err := doInRoot(r, name, 0, nil, func(parent sysfdType, name string, endsInSlash bool) (struct{}, error) {
++		if runtime.GOOS == "darwin" && (atime.IsZero() || mtime.IsZero()) {
++			// Snow Leopard cannot reliably apply a single timestamp through
++			// the emulated utimensat call. Preserve omitted values explicitly
++			// after the path has been resolved inside the root.
++			info, err := lstatat(parent, name)
++			if err != nil {
++				return struct{}{}, err
++			}
++			if atime.IsZero() {
++				atime = snowLeopardAtime(info)
++			}
++			if mtime.IsZero() {
++				mtime = info.ModTime()
++			}
++		}
+ 		return struct{}{}, chtimesat(parent, name, atime, mtime)
+ 	})
+ 	if err != nil {
+@@ -280,6 +296,19 @@ func rootLink(r *Root, oldname, newname string) error {
+ 			// Windows doesn't pay attention to trailing slashes in the link target.
+ 			flags |= doInRootNoHandleTerminalSlash
+ 		}
++		if runtime.GOOS == "darwin" {
++			// Snow Leopard has no native linkat. MacPorts Legacy Support
++			// implements it with link, which follows a symlink source on this
++			// system. Reject that case instead of linking the target and
++			// violating Root.Link's path semantics.
++			info, err := lstatat(oldparent, oldname)
++			if err != nil {
++				return struct{}{}, err
++			}
++			if info.Mode()&ModeSymlink != 0 {
++				return struct{}{}, syscall.ENOTSUP
++			}
++		}
+ 		_, err := doInRoot(r, newname, flags, nil, func(newparent sysfdType, newname string, newEndsInSlash bool) (struct{}, error) {
+ 			return struct{}{}, linkat(oldparent, oldname, newparent, newname)
+ 		})
+--- /dev/null
++++ b/src/os/stat_atime_snow_leopard.go
+@@ -0,0 +1,17 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build darwin
++
++package os
++
++import (
++	"syscall"
++	"time"
++)
++
++func snowLeopardAtime(info FileInfo) time.Time {
++	stat := info.Sys().(*syscall.Stat_t)
++	return time.Unix(stat.Atimespec.Unix())
++}
+--- /dev/null
++++ b/src/os/stat_atime_snow_leopard_other.go
+@@ -0,0 +1,14 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build !darwin
++
++package os
++
++import "time"
++
++// The caller guards this helper with runtime.GOOS == "darwin". Defining the
++// stub keeps patched common source type-correct for cross-compilation.
++func snowLeopardAtime(FileInfo) time.Time { return time.Time{} }
++
+--- a/src/os/root_test.go
++++ b/src/os/root_test.go
+@@ -510,7 +510,7 @@ func TestRootChtimes(t *testing.T) {
+ 				mtime: time.Time{},
+ 			}} {
+ 				switch runtime.GOOS {
+-				case "js", "plan9":
++				case "darwin", "js", "plan9":
+ 					times.atime = times.atime.Truncate(1 * time.Second)
+ 					times.mtime = times.mtime.Truncate(1 * time.Second)
+ 				case "illumos":
+@@ -863,6 +863,9 @@ func testRootMoveFrom(t *testing.T, rename bool) {
+ 					t.Fatal(err)
+ 				}
+ 			}
++			if !rename && runtime.GOOS == "darwin" && test.ltarget != "" {
++				t.Skip("Snow Leopard cannot hard-link a symlink without following it")
++			}
+ 			wantError := test.wantError
+ 			var linkTarget string
+ 			if test.ltarget != "" {
+@@ -1556,6 +1559,14 @@ func testRootConsistencyMove(t *testing.T, rename bool) {
+	for _, name := range []string{"from", "to"} {
+ 		t.Run(name, func(t *testing.T) {
+ 			for _, test := range rootConsistencyTestCases {
++				if runtime.GOOS == "darwin" && !rename && name == "from" {
++					// HFS+ permits directory hard links through link, while the
++					// confined legacy linkat implementation safely rejects them.
++					switch test.open {
++					case ".", "./", "target/", "target/.", "link/", "link/.":
++						continue
++					}
++				}
+ 				if runtime.GOOS == "windows" {
+ 					// On Windows, Rename("/path/to/.", x) succeeds,
+ 					// because Windows cleans the path to just "/path/to".

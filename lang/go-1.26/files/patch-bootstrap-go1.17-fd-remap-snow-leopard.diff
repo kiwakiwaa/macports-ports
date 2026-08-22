@@ -1,0 +1,51 @@
+--- a/src/syscall/exec_libc2.go
++++ b/src/syscall/exec_libc2.go
+@@ -180,11 +180,14 @@
+ 	// Pass 1: look for fd[i] < i and move those up above len(fd)
+ 	// so that pass 2 won't stomp on an fd it needs later.
+ 	if pipe < nextfd {
+-		_, _, err1 = rawSyscall(abi.FuncPCABI0(libc_dup2_trampoline), uintptr(pipe), uintptr(nextfd), 0)
++		r1, _, err1 = rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(pipe), F_DUPFD, uintptr(nextfd))
+ 		if err1 != 0 {
+ 			goto childerror
+ 		}
++		nextfd = int(r1)
+ 		rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(nextfd), F_SETFD, FD_CLOEXEC)
++		// F_DUPFD may choose a descriptor above its minimum. Preserve the
++		// actual result so later remapping and close-on-exec handling agree.
+ 		pipe = nextfd
+ 		nextfd++
+ 	}
+@@ -193,10 +196,11 @@
+ 			if nextfd == pipe { // don't stomp on pipe
+ 				nextfd++
+ 			}
+-			_, _, err1 = rawSyscall(abi.FuncPCABI0(libc_dup2_trampoline), uintptr(fd[i]), uintptr(nextfd), 0)
++			r1, _, err1 = rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(fd[i]), F_DUPFD, uintptr(nextfd))
+ 			if err1 != 0 {
+ 				goto childerror
+ 			}
++			nextfd = int(r1)
+ 			rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(nextfd), F_SETFD, FD_CLOEXEC)
+ 			fd[i] = nextfd
+ 			nextfd++
+@@ -218,9 +222,16 @@
+ 			}
+ 			continue
+ 		}
+-		// The new fd is created NOT close-on-exec,
+-		// which is exactly what we want.
+-		_, _, err1 = rawSyscall(abi.FuncPCABI0(libc_dup2_trampoline), uintptr(fd[i]), uintptr(i), 0)
++		// Snow Leopard's dup2 can block forever while atomically closing an
++		// occupied target after fork. Pass 1 ensures that closing i cannot
++		// destroy a descriptor needed later, and F_DUPFD must therefore return
++		// exactly i with its close-on-exec flag clear.
++		rawSyscall(abi.FuncPCABI0(libc_close_trampoline), uintptr(i), 0, 0)
++		r1, _, err1 = rawSyscall(abi.FuncPCABI0(libc_fcntl_trampoline), uintptr(fd[i]), F_DUPFD, uintptr(i))
++		if err1 == 0 && int(r1) != i {
++			rawSyscall(abi.FuncPCABI0(libc_close_trampoline), r1, 0, 0)
++			err1 = EINVAL
++		}
+ 		if err1 != 0 {
+ 			goto childerror
+ 		}

@@ -1,0 +1,19 @@
+--- a/src/crypto/x509/hybrid_pool_test.go
++++ b/src/crypto/x509/hybrid_pool_test.go
+@@ -87,7 +87,15 @@ func TestHybridPool(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("SystemCertPool failed: %s", err)
+ 	}
+-	opts := x509.VerifyOptions{Roots: pool}
++	intermediates := x509.NewCertPool()
++	for _, cert := range googChain[1:] {
++		intermediates.AddCert(cert)
++	}
++	// Snow Leopard's platform verifier has a frozen root store, so
++	// SystemCertPool uses the MacPorts CA bundle and the pure-Go verifier.
++	// Supply the intermediates returned by the server because the pure-Go
++	// verifier deliberately does not fetch missing certificates over AIA.
++	opts := x509.VerifyOptions{Roots: pool, Intermediates: intermediates}
+ 
+ 	_, err = googChain[0].Verify(opts)
+ 	if err != nil {

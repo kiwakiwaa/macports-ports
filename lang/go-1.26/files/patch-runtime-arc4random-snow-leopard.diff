@@ -1,0 +1,5 @@
+--- a/src/runtime/sys_darwin.go
++++ b/src/runtime/sys_darwin.go
+@@ -703 +703 @@
+-//go:cgo_import_dynamic libc_arc4random_buf arc4random_buf "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_arc4random_buf arc4random_buf "@PREFIX@/lib/libMacportsLegacySupport.dylib"

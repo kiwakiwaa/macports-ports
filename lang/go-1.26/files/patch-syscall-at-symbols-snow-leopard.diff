@@ -1,0 +1,42 @@
+--- a/src/syscall/zsyscall_darwin_amd64.go
++++ b/src/syscall/zsyscall_darwin_amd64.go
+@@ -398 +398 @@
+-//go:cgo_import_dynamic libc_utimensat utimensat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_utimensat utimensat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -1851 +1851 @@
+-//go:cgo_import_dynamic libc_unlinkat unlinkat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_unlinkat unlinkat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -1871 +1871 @@
+-//go:cgo_import_dynamic libc_openat openat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_openat openat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -2010 +2010 @@
+-//go:cgo_import_dynamic libc_fstatat64 fstatat64 "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_fstatat64 fstatat64 "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+--- a/src/internal/syscall/unix/at_darwin.go
++++ b/src/internal/syscall/unix/at_darwin.go
+@@ -17 +17 @@
+-//go:cgo_import_dynamic libc_readlinkat readlinkat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_readlinkat readlinkat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -45 +45 @@
+-//go:cgo_import_dynamic libc_mkdirat mkdirat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_mkdirat mkdirat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -64 +64 @@
+-//go:cgo_import_dynamic libc_fchmodat fchmodat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_fchmodat fchmodat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -86 +86 @@
+-//go:cgo_import_dynamic libc_fchownat fchownat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_fchownat fchownat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -108 +108 @@
+-//go:cgo_import_dynamic libc_renameat renameat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_renameat renameat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -134 +134 @@
+-//go:cgo_import_dynamic libc_linkat linkat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_linkat linkat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+@@ -160 +160 @@
+-//go:cgo_import_dynamic libc_symlinkat symlinkat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_symlinkat symlinkat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
+--- a/src/internal/syscall/unix/faccessat_darwin.go
++++ b/src/internal/syscall/unix/faccessat_darwin.go
+@@ -15 +15 @@
+-//go:cgo_import_dynamic libc_faccessat faccessat "/usr/lib/libSystem.B.dylib"
++//go:cgo_import_dynamic libc_faccessat faccessat "@PREFIX@/lib/libMacportsLegacySupport.dylib"
