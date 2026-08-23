@@ -6,7 +6,7 @@ PortGroup           golang 1.0
 go.setup            github.com/tailscale/tailscale 1.102.3 v
 go.package          tailscale.com
 go.toolchain_min    1.26.5
-revision            1
+revision            2
 
 homepage            https://tailscale.com
 
@@ -557,7 +557,7 @@ post-extract {
     foreach vendor ${go.vendors_internal} {
         lassign ${vendor} _ package _ _ _
         if {${package} ne ${go.package}} {
-            puts ${gomod} "replace ${package} => ${gopath}/src/${package}"
+            puts ${gomod} "replace ${package} => ../${package}"
             set vendormod ${gopath}/src/${package}/go.mod
             if {![file exists ${vendormod}]} {
                 # Older Go modules predate go.mod. A minimal local manifest
