@@ -168,7 +168,7 @@ set go_toolchain.min_darwin(1.22)   17  ;# 10.13 High Sierra
 set go_toolchain.min_darwin(1.23)   17  ;# 10.13 High Sierra
 set go_toolchain.min_darwin(1.24)   17  ;# 10.13 High Sierra
 set go_toolchain.min_darwin(1.25)   21  ;# 12    Monterey
-set go_toolchain.min_darwin(1.26)   21  ;# 12    Monterey
+set go_toolchain.min_darwin(1.26)   13  ;# 10.9  Mavericks     (see below)
 set go_toolchain.min_darwin(1.27)   21  ;# 12    Monterey     (see below)
 
 # The oldest darwin major version from which a series may be chosen as the
@@ -195,10 +195,15 @@ set go_toolchain.min_darwin(1.27)   21  ;# 12    Monterey     (see below)
 # 10.6, its dsymutil step is skipped because that tool cannot read the Go
 # linker's DWARF. See lang/go-1.17.
 #
+# 1.26 is source-bootstrapped on Mavericks. Its versioned port replaces
+# post-Mavericks runtime, filesystem and Security.framework imports with the
+# matching older interfaces or MacPorts Legacy Support. Snow Leopard uses a
+# wider dedicated compatibility path in the same port.
+#
 # 1.27 is below upstream's floor of 13 Ventura. Its imports are those of 1.25
-# and 1.26, the newest being SecTrustCopyCertificateChain, which macOS 12
-# provides. Reread at 1.27.0: the directives and the shipped binaries' undefined
-# symbols are unchanged from the prerelease, and from 1.26.
+# and unpatched 1.26, the newest being SecTrustCopyCertificateChain, which macOS
+# 12 provides. Reread at 1.27.0: the directives and the shipped binaries'
+# undefined symbols are unchanged from the prerelease, and from 1.26.
 #
 # This entry decides where go-devel is offered, setup deriving its platforms
 # from it. It is never returned as a ceiling, being the newest series here, and

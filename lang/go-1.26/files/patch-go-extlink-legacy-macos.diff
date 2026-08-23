@@ -1,0 +1,21 @@
+--- a/src/internal/buildcfg/cfg.go
++++ b/src/internal/buildcfg/cfg.go
+@@ -357,8 +357,17 @@ func gowasm() (f gowasmFeatures) {
+ 	return
+ }
+ 
+ func Getgoextlinkenabled() string {
+-	return envOr("GO_EXTLINK_ENABLED", defaultGO_EXTLINK_ENABLED)
++	if enabled := os.Getenv("GO_EXTLINK_ENABLED"); enabled != "" {
++		return enabled
++	}
++	if GOOS != defaultGOOS || GOARCH != defaultGOARCH {
++		// This legacy Darwin toolchain is built with external linking enabled
++		// so native programs can use MacPorts Legacy Support. That host-only
++		// default must not send cross-compiled objects to Darwin's linker.
++		return ""
++	}
++	return defaultGO_EXTLINK_ENABLED
+ }
+ 
+ func toolTags() []string {
