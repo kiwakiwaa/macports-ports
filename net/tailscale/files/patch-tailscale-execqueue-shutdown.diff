@@ -1,0 +1,43 @@
+--- ipn/ipnlocal/extension_host.go
++++ ipn/ipnlocal/extension_host.go
+@@ -577,7 +577,6 @@
+ }
+ 
+ func (h *ExtensionHost) shutdownWorkQueue() {
+-	h.workQueue.Shutdown()
+ 	var ctx context.Context
+ 	if testenv.InTest() {
+ 		// In tests, we'd like to wait indefinitely for the current operation to finish,
+@@ -593,7 +592,7 @@
+ 	}
+ 	// Since callbacks are invoked synchronously, this will also wait
+ 	// for in-flight callbacks associated with those operations to finish.
+-	if err := h.workQueue.Wait(ctx); err != nil {
++	if err := h.workQueue.ShutdownAndWait(ctx); err != nil {
+ 		h.logf("work queue shutdown failed: %v", err)
+ 	}
+ }
+@@ -641,6 +640,5 @@
+ // to allow testing with a mock implementation.
+ type execQueue interface {
+ 	Add(func())
+-	Shutdown()
+-	Wait(context.Context) error
++	ShutdownAndWait(context.Context) error
+ }
+--- ipn/ipnlocal/extension_host_test.go
++++ ipn/ipnlocal/extension_host_test.go
+@@ -1350,11 +1350,8 @@
+ 	}
+ }
+ 
+-// Shutdown implements [execQueue].
+-func (q *testExecQueue) Shutdown() {}
+-
+-// Wait implements [execQueue].
+-func (q *testExecQueue) Wait(context.Context) error { return nil }
++// ShutdownAndWait implements [execQueue].
++func (q *testExecQueue) ShutdownAndWait(context.Context) error { return nil }
+ 
+ // testBackend implements [ipnext.Backend] for testing purposes
+ // by calling the provided hooks when its methods are called.

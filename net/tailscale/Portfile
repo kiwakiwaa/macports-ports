@@ -10,7 +10,7 @@ if {${os.platform} eq "darwin" && ${os.major} == 13} {
 go.setup            github.com/tailscale/tailscale 1.102.3 v
 go.package          tailscale.com
 go.toolchain_min    1.26.5
-revision            3
+revision            4
 
 homepage            https://tailscale.com
 
@@ -552,6 +552,8 @@ build.pre_args-append \
 
 build.args-append   -o _build ./cmd/${name} ./cmd/${name}d
 
+patchfiles-append   patch-tailscale-execqueue-shutdown.diff
+
 post-extract {
     file mkdir ${worksrcpath}/_build
 
@@ -574,6 +576,13 @@ post-extract {
         }
     }
     close ${gomod}
+}
+
+if {${os.platform} eq "darwin" && (${os.major} == 10 || ${os.major} == 13)} {
+    post-extract {
+        system -W ${worksrcpath} \
+            "${patch.cmd} -p1 < ${filespath}/patch-tailscale-legacy-darwin-common.diff"
+    }
 }
 
 if {${os.platform} eq "darwin" && ${os.major} == 13} {

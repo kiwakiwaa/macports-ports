@@ -1,0 +1,191 @@
+--- a/feature/acme/cert_test.go
++++ b/feature/acme/cert_test.go
+@@ -744,6 +744,8 @@
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 
++			oldShareMode := os.Getenv("TS_CERT_SHARE_MODE")
++			t.Cleanup(func() { envknob.Setenv("TS_CERT_SHARE_MODE", oldShareMode) })
+ 			tstest.AssertNotParallel(t)
+ 			if tt.readOnlyMode {
+ 				envknob.Setenv("TS_CERT_SHARE_MODE", "ro")
+@@ -949,6 +951,12 @@
+ 	}
+ 	t.Cleanup(func() { getCertPEM = orig })
+ 
++	// Pin the renewal decision so this deduplication test does not depend
++	// on a live ACME ARI response.
++	e.renewMu.Lock()
++	e.renewCertAt = map[string]time.Time{domain: b.Clock().Now().Add(-time.Hour)}
++	e.renewMu.Unlock()
++
+ 	// First trigger starts the async renewal.
+ 	prevGo := e.goroutinesStarted.Load()
+ 	pair, err := b.GetCertPEMWithValidity(context.Background(), domain, 0)
+@@ -958,14 +966,14 @@
+ 	if pair == nil || !pair.Cached {
+ 		t.Fatalf("first GetCertPEMWithValidity = %+v, want cached cert", pair)
+ 	}
+-	if got := e.goroutinesStarted.Load() - prevGo; got != 1 {
+-		t.Fatalf("first call spawned %d goroutine(s), want 1 (async renewal started)", got)
+-	}
+ 	select {
+ 	case <-renewalStarted:
+ 	case <-time.After(5 * time.Second):
+ 		t.Fatal("timed out waiting for async renewal to enter getCertPEM")
+ 	}
++	if got := e.goroutinesStarted.Load() - prevGo; got != 1 {
++		t.Fatalf("first call spawned %d goroutine(s), want 1 (async renewal started)", got)
++	}
+ 
+ 	// A second trigger while the renewal is still in flight must be
+ 	// deduplicated: no new goroutine.
+--- a/logtail/filch/filch.go
++++ b/logtail/filch/filch.go
+@@ -437,11 +437,13 @@
+ 	path1 := filePrefix + ".log1.txt"
+ 	path2 := filePrefix + ".log2.txt"
+ 
+-	f1, err = os.OpenFile(path1, os.O_CREATE|os.O_RDWR, 0600)
++	// O_APPEND keeps direct and filched stderr writes from racing over the
++	// shared file offset on older Darwin kernels.
++	f1, err = os.OpenFile(path1, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	f2, err = os.OpenFile(path2, os.O_CREATE|os.O_RDWR, 0600)
++	f2, err = os.OpenFile(path2, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+--- a/logtail/filch/filch_test.go
++++ b/logtail/filch/filch_test.go
+@@ -188,10 +188,12 @@
+ 			}
+ 		} else {
+ 			// Synchronous reading of all lines.
+-			draining.Lock()
+-			for checkLine() {
+-			}
+-			draining.Unlock()
++			func() {
++				draining.Lock()
++				defer draining.Unlock()
++				for checkLine() {
++				}
++			}()
+ 		}
+ 	}
+ }
+--- a/net/netcheck/netcheck_test.go
++++ b/net/netcheck/netcheck_test.go
+@@ -995,7 +995,7 @@
+ 	dnV4Only := &tailcfg.DERPNode{
+ 		Name:     "derptest1b",
+ 		RegionID: 901,
+-		HostName: "ipv4.google.com",
++		HostName: "v4-only.invalid",
+ 		// No IPv4 or IPv6 addrs
+ 	}
+ 
+--- a/ssh/tailssh/tailssh_test.go
++++ b/ssh/tailssh/tailssh_test.go
+@@ -1162,7 +1162,7 @@
+ 	execSSH := func(args ...string) *exec.Cmd {
+ 		cmd := exec.Command("ssh",
+ 			"-F",
+-			"none",
++			"/dev/null",
+ 			"-v",
+ 			"-p", fmt.Sprint(port),
+ 			"-o", "StrictHostKeyChecking=no",
+--- a/util/osuser/user.go
++++ b/util/osuser/user.go
+@@ -106,6 +106,13 @@
+ 		}, "/bin/rc", nil
+ 	}
+ 
++	// Darwin has no system getent. os/user supplies directory-service
++	// identity data, and callers obtain the login shell with dscl.
++	if runtime.GOOS == "darwin" {
++		u, err := std(usernameOrUID)
++		return u, "", err
++	}
++
+ 	// Start with getent if caller wants to get the user shell.
+ 	if wantShell {
+ 		return userLookupGetent(usernameOrUID, std)
+--- a/net/netmon/interfaces_darwin_test.go
++++ b/net/netmon/interfaces_darwin_test.go
+@@ -72,20 +72,26 @@
+ 	defer io.Copy(io.Discard, stdout) // clear the pipe to prevent hangs
+ 
+ 	var f []mem.RO
++	netifField := -1
+ 	for lr := range lineiter.Reader(stdout) {
+ 		lineb, err := lr.Value()
+ 		if err != nil {
+ 			break
+ 		}
+ 		line := mem.B(lineb)
+-		if !mem.Contains(line, mem.S("default")) {
++		f = mem.AppendFields(f[:0], line)
++		if len(f) > 0 && f[0].EqualString("Destination") {
++			for i := range f {
++				if f[i].EqualString("Netif") {
++					netifField = i
++				}
++			}
+ 			continue
+ 		}
+-		f = mem.AppendFields(f[:0], line)
+-		if len(f) < 4 || !f[0].EqualString("default") {
++		if netifField < 0 || len(f) <= netifField || !f[0].EqualString("default") {
+ 			continue
+ 		}
+-		ipm, flagsm, netifm := f[1], f[2], f[3]
++		ipm, flagsm, netifm := f[1], f[2], f[netifField]
+ 		if !mem.Contains(flagsm, mem.S("G")) {
+ 			continue
+ 		}
+@@ -120,6 +126,9 @@
+ 		t.Fatalf("netInterfaces() error: %v", err)
+ 	}
+ 
++	oldIfName := lastKnownDefaultRouteIfName.Load()
++	t.Cleanup(func() { lastKnownDefaultRouteIfName.Store(oldIfName) })
++
+ 	// Set it as our last known default route interface
+ 	ifName := interfaces[0].Name
+ 	UpdateLastKnownDefaultRouteInterface(ifName)
+--- a/net/tcpinfo/tcpinfo_darwin.go
++++ b/net/tcpinfo/tcpinfo_darwin.go
+@@ -25,6 +25,8 @@
+ 	})
+ 	if err != nil {
+ 		return 0, err
++	} else if sysErr == unix.ENOPROTOOPT {
++		return 0, ErrUnimplemented
+ 	} else if sysErr != nil {
+ 		return 0, sysErr
+ 	}
+--- a/net/tcpinfo/tcpinfo_test.go
++++ b/net/tcpinfo/tcpinfo_test.go
+@@ -5,6 +5,7 @@
+ 
+ import (
+ 	"bytes"
++	"errors"
+ 	"io"
+ 	"net"
+ 	"runtime"
+@@ -53,6 +54,9 @@
+ 
+ 	// Get the RTT now
+ 	rtt, err := RTT(conn)
++	if errors.Is(err, ErrUnimplemented) {
++		t.Skip("TCP connection info is unavailable on this Darwin version")
++	}
+ 	if err != nil {
+ 		t.Fatalf("error getting RTT: %v", err)
+ 	}
