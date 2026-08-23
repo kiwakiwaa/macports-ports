@@ -5,12 +5,18 @@
  // platform.
  func CPUProfilingBroken() bool {
 +	if runtime.GOOS == "darwin" {
-+		// Snow Leopard only provides process-wide ITIMER_PROF timers. Their
++		// Legacy Darwin only provides process-wide ITIMER_PROF timers. Their
 +		// SIGPROF signals are not reliably delivered to the thread consuming
-+		// CPU, and Snow Leopard has no timer_create API for targeting it.
++		// CPU, and these systems have no timer_create API for targeting it.
 +		return true
 +	}
 +
  	switch runtime.GOOS {
  	case "plan9":
  		// Profiling unimplemented.
+--- a/src/runtime/pprof/pprof_test.go
++++ b/src/runtime/pprof/pprof_test.go
+@@ -462,0 +463,3 @@ func testCPUProfile(t *testing.T, matches profileMatchFunc, f func(dur time.Dur
++		if broken && duration > time.Second {
++			break
++		}

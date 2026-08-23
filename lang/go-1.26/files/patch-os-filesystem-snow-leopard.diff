@@ -4,7 +4,7 @@
  // If there is an error, it will be of type [*PathError].
  func Chtimes(name string, atime time.Time, mtime time.Time) error {
 +	if runtime.GOOS == "darwin" && (atime.IsZero() || mtime.IsZero()) {
-+		// The Snow Leopard setattrlist implementation used by MacPorts
++		// The legacy setattrlist implementation used by MacPorts
 +		// Legacy Support does not apply an access-time-only update. Resolve
 +		// omitted values here and submit both timestamps explicitly.
 +		info, err := Stat(name)
@@ -28,7 +28,7 @@
  func rootChtimes(r *Root, name string, atime time.Time, mtime time.Time) error {
  	_, err := doInRoot(r, name, 0, nil, func(parent sysfdType, name string, endsInSlash bool) (struct{}, error) {
 +		if runtime.GOOS == "darwin" && (atime.IsZero() || mtime.IsZero()) {
-+			// Snow Leopard cannot reliably apply a single timestamp through
++			// Legacy Darwin cannot reliably apply a single timestamp through
 +			// the emulated utimensat call. Preserve omitted values explicitly
 +			// after the path has been resolved inside the root.
 +			info, err := lstatat(parent, name)
@@ -50,7 +50,7 @@
  			flags |= doInRootNoHandleTerminalSlash
  		}
 +		if runtime.GOOS == "darwin" {
-+			// Snow Leopard has no native linkat. MacPorts Legacy Support
++			// These systems have no native linkat. MacPorts Legacy Support
 +			// implements it with link, which follows a symlink source on this
 +			// system. Reject that case instead of linking the target and
 +			// violating Root.Link's path semantics.
@@ -118,7 +118,7 @@
  				}
  			}
 +			if !rename && runtime.GOOS == "darwin" && test.ltarget != "" {
-+				t.Skip("Snow Leopard cannot hard-link a symlink without following it")
++				t.Skip("legacy Darwin cannot hard-link a symlink without following it")
 +			}
  			wantError := test.wantError
  			var linkTarget string

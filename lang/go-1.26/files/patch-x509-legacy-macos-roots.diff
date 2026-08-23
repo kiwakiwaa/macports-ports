@@ -1,0 +1,42 @@
+--- a/src/crypto/x509/root_darwin.go
++++ b/src/crypto/x509/root_darwin.go
+@@ -8,6 +8,7 @@
+ 	"crypto/x509/internal/macos"
+ 	"errors"
+ 	"fmt"
++	"os"
+ )
+ 
+ func (c *Certificate) systemVerify(opts *VerifyOptions) (chains [][]*Certificate, err error) {
+@@ -127,5 +128,30 @@
+ }
+ 
+ func loadSystemRoots() (*CertPool, error) {
+-	return &CertPool{systemPool: true}, nil
++	// These legacy systems have frozen trust stores, and their Security
++	// frameworks cannot reliably evaluate current certificate chains.
++	// Use the MacPorts-managed CA bundle while preserving SSL_CERT_FILE.
++	files := []string{"@PREFIX@/etc/openssl/cert.pem"}
++	if file := os.Getenv("SSL_CERT_FILE"); file != "" {
++		files = []string{file}
++	}
++
++	var firstErr error
++	for _, file := range files {
++		data, err := os.ReadFile(file)
++		if err != nil {
++			if firstErr == nil {
++				firstErr = err
++			}
++			continue
++		}
++		roots := NewCertPool()
++		if roots.AppendCertsFromPEM(data) {
++			return roots, nil
++		}
++		if firstErr == nil {
++			firstErr = errors.New("x509: system root bundle contains no certificates")
++		}
++	}
++	return nil, firstErr
+ }

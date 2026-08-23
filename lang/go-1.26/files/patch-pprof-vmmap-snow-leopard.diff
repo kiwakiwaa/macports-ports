@@ -5,7 +5,7 @@
  		if grabbing {
  			p := strings.Fields(l)
 -			if len(p) > 7 && p[0] == "__TEXT" && p[7] == "r-x/rwx" {
-+			// Snow Leopard reports only VSIZE in the bracketed columns, so the
++			// Legacy vmmap reports only VSIZE in the bracketed columns, so the
 +			// protection field appears earlier than it does in modern vmmap output.
 +			if len(p) > 1 && p[0] == "__TEXT" &&
 +				strings.Contains(l, " r-x/rwx ") {

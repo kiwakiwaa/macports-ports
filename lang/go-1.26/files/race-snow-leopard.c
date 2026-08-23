@@ -1,11 +1,11 @@
 /*
  * The Go race runtime is built on a newer macOS SDK. Its sanitizer support
- * references private direct-system-call entry points introduced after Snow
- * Leopard, plus optional dyld-cache and pthread-introspection APIs.
+ * references private direct-system-call entry points introduced after these
+ * legacy systems, plus optional dyld-cache and pthread-introspection APIs.
  *
  * Keep this shim limited to the missing ABI. The sanitizer already contains
- * equivalent fallbacks, but its weak imports are not accepted by Snow
- * Leopard's linker when the final executable is produced.
+ * equivalent fallbacks, but the legacy linkers cannot resolve its weak imports
+ * when the final executable is produced.
  */
 
 #include <stdbool.h>
