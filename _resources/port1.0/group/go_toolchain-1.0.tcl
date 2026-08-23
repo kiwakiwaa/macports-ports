@@ -375,6 +375,10 @@ proc go_toolchain.ceiling {} {
         return {}
     }
 
+    if {${os.major} == 10} {
+        return [go_toolchain.snow_leopard]
+    }
+
     set best {}
     foreach minor [array names go_toolchain.min_darwin] {
         if {${os.major} >= [go_toolchain.min_default ${minor}]} {
