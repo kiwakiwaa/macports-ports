@@ -1,0 +1,529 @@
+diff --git a/certstore_darwin.go b/certstore_darwin.go
+index ae511b3..3f6bbb6 100644
+--- a/certstore_darwin.go
++++ b/certstore_darwin.go
+@@ -4,16 +4,104 @@ package certstore
+ #cgo CFLAGS: -x objective-c
+ #cgo LDFLAGS: -framework CoreFoundation -framework Security
+ #include <CoreFoundation/CoreFoundation.h>
+-#include <Security/Security.h>
++#include <Security/SecCertificate.h>
++#include <Security/SecIdentity.h>
++#include <Security/SecImportExport.h>
++#include <Security/SecIdentitySearch.h>
++#include <Security/SecKey.h>
++#include <Security/SecKeychain.h>
++#include <Security/SecKeychainItem.h>
++#include <Security/SecPolicy.h>
++#include <Security/SecTrust.h>
++#include <Security/cssmapi.h>
++
++static OSStatus certstoreTrustCopyChain(SecTrustRef trust, CFArrayRef *chain) {
++	CSSM_TP_APPLE_EVIDENCE_INFO *statusChain = NULL;
++	return SecTrustGetResult(trust, NULL, chain, &statusChain);
++}
++
++static OSStatus certstoreSign(SecKeyRef key, CSSM_ALGORITHMS algorithm,
++    CSSM_PADDING padding, Boolean setPadding, const uint8_t *digest,
++    size_t digestLen, uint8_t *sig, size_t *sigLen) {
++	CSSM_CSP_HANDLE csp;
++	const CSSM_KEY *cssmKey;
++	const CSSM_ACCESS_CREDENTIALS *credentials;
++	CSSM_CC_HANDLE context = 0;
++
++	OSStatus status = SecKeyGetCSPHandle(key, &csp);
++	if (status != errSecSuccess) {
++		return status;
++	}
++	status = SecKeyGetCSSMKey(key, &cssmKey);
++	if (status != errSecSuccess) {
++		return status;
++	}
++	status = SecKeyGetCredentials(key, CSSM_ACL_AUTHORIZATION_SIGN,
++		kSecCredentialTypeDefault, &credentials);
++	if (status != errSecSuccess) {
++		return status;
++	}
++
++	CSSM_RETURN result = CSSM_CSP_CreateSignatureContext(csp,
++		algorithm, credentials, cssmKey, &context);
++	if (result != CSSM_OK) {
++		return result;
++	}
++	if (setPadding) {
++		CSSM_CONTEXT_ATTRIBUTE attribute = {0};
++		attribute.AttributeType = CSSM_ATTRIBUTE_PADDING;
++		attribute.AttributeLength = sizeof(CSSM_PADDING);
++		attribute.Attribute.Padding = padding;
++		result = CSSM_UpdateContextAttributes(context, 1, &attribute);
++		if (result != CSSM_OK) {
++			CSSM_DeleteContext(context);
++			return result;
++		}
++	}
++
++	CSSM_DATA input = {(CSSM_SIZE)digestLen, (uint8_t *)digest};
++	CSSM_DATA output = {(CSSM_SIZE)*sigLen, sig};
++	result = CSSM_SignData(context, &input, 1, CSSM_ALGID_NONE, &output);
++	CSSM_DeleteContext(context);
++	if (result == CSSM_OK) {
++		*sigLen = output.Length;
++	}
++	return result;
++}
++
++static OSStatus certstorePKCS12Import(CFDataRef data, CFStringRef passphrase) {
++	SecExternalFormat format = kSecFormatPKCS12;
++	SecExternalItemType itemType = kSecItemTypeAggregate;
++	SecKeyImportExportParameters params = {0};
++	params.version = SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION;
++	params.passphrase = passphrase;
++
++	SecKeychainRef keychain = NULL;
++	OSStatus status = SecKeychainCopyDefault(&keychain);
++	if (status != errSecSuccess) {
++		return status;
++	}
++
++	CFArrayRef items = NULL;
++	status = SecKeychainItemImport(data, NULL, &format, &itemType, 0,
++		&params, keychain, &items);
++	if (items != NULL) {
++		CFRelease(items);
++	}
++	CFRelease(keychain);
++	return status;
++}
+ */
+ import "C"
+ import (
+ 	"crypto"
+ 	"crypto/ecdsa"
++	cryptorand "crypto/rand"
+ 	"crypto/rsa"
+ 	"crypto/x509"
+ 	"errors"
+ 	"fmt"
++	"hash"
+ 	"io"
+ 	"unsafe"
+ )
+@@ -43,40 +131,28 @@ func openStore(_ StoreLocation, _ ...StorePermission) (macStore, error) {
+ 
+ // Identities implements the Store interface.
+ func (s macStore) Identities() ([]Identity, error) {
+-	query := mapToCFDictionary(map[C.CFTypeRef]C.CFTypeRef{
+-		C.CFTypeRef(C.kSecClass):      C.CFTypeRef(C.kSecClassIdentity),
+-		C.CFTypeRef(C.kSecReturnRef):  C.CFTypeRef(C.kCFBooleanTrue),
+-		C.CFTypeRef(C.kSecMatchLimit): C.CFTypeRef(C.kSecMatchLimitAll),
+-	})
+-	if query == nilCFDictionaryRef {
+-		return nil, errors.New("error creating CFDictionary")
+-	}
+-	defer C.CFRelease(C.CFTypeRef(query))
+-
+-	var absResult C.CFTypeRef
+-	if err := osStatusError(C.SecItemCopyMatching(query, &absResult)); err != nil {
+-		if err == errSecItemNotFound {
+-			return []Identity{}, nil
+-		}
+-
++	var search C.SecIdentitySearchRef
++	if err := osStatusError(C.SecIdentitySearchCreate(0, C.CSSM_KEYUSE_SIGN, &search)); err != nil {
+ 		return nil, err
+ 	}
+-	defer C.CFRelease(C.CFTypeRef(absResult))
+-
+-	// don't need to release aryResult since the abstract result is released above.
+-	aryResult := C.CFArrayRef(absResult)
++	defer C.CFRelease(C.CFTypeRef(search))
+ 
+-	// identRefs aren't owned by us initially. newMacIdentity retains them.
+-	n := C.CFArrayGetCount(aryResult)
+-	identRefs := make([]C.CFTypeRef, n)
+-	C.CFArrayGetValues(aryResult, C.CFRange{0, n}, (*unsafe.Pointer)(unsafe.Pointer(&identRefs[0])))
++	var identities []Identity
++	for {
++		var identity C.SecIdentityRef
++		status := C.SecIdentitySearchCopyNext(search, &identity)
++		if osStatus(status) == errSecItemNotFound {
++			break
++		}
++		if err := osStatusError(status); err != nil {
++			return nil, err
++		}
+ 
+-	idents := make([]Identity, 0, n)
+-	for _, identRef := range identRefs {
+-		idents = append(idents, newMacIdentity(C.SecIdentityRef(identRef)))
++		identities = append(identities, newMacIdentity(identity))
++		C.CFRelease(C.CFTypeRef(identity))
+ 	}
+ 
+-	return idents, nil
++	return identities, nil
+ }
+ 
+ // Import implements the Store interface.
+@@ -90,19 +166,11 @@ func (s macStore) Import(data []byte, password string) error {
+ 	cpass := stringToCFString(password)
+ 	defer C.CFRelease(C.CFTypeRef(cpass))
+ 
+-	cops := mapToCFDictionary(map[C.CFTypeRef]C.CFTypeRef{
+-		C.CFTypeRef(C.kSecImportExportPassphrase): C.CFTypeRef(cpass),
+-	})
+-	if cops == nilCFDictionaryRef {
+-		return errors.New("error creating CFDictionary")
+-	}
+-	defer C.CFRelease(C.CFTypeRef(cops))
+-
+-	var cret C.CFArrayRef
+-	if err := osStatusError(C.SecPKCS12Import(cdata, cops, &cret)); err != nil {
++	// SecPKCS12Import's dictionary key is not exported by Snow Leopard's
++	// Security framework. Its older item-import API supports the same format.
++	if err := osStatusError(C.certstorePKCS12Import(cdata, cpass)); err != nil {
+ 		return err
+ 	}
+-	defer C.CFRelease(C.CFTypeRef(cret))
+ 
+ 	return nil
+ }
+@@ -153,33 +221,57 @@ func (i *macIdentity) CertificateChain() ([]*x509.Certificate, error) {
+ 	}
+ 
+ 	policy := C.SecPolicyCreateSSL(0, nilCFStringRef)
++	if policy == 0 {
++		return nil, errors.New("error creating certificate policy")
++	}
++	defer C.CFRelease(C.CFTypeRef(policy))
++
++	certValues := []C.SecCertificateRef{certRef}
++	certArray := C.CFArrayCreate(
++		nilCFAllocatorRef,
++		(*unsafe.Pointer)(unsafe.Pointer(&certValues[0])),
++		1,
++		nil,
++	)
++	if certArray == nilCFArrayRef {
++		return nil, errors.New("error creating certificate array")
++	}
++	defer C.CFRelease(C.CFTypeRef(certArray))
+ 
+ 	var trustRef C.SecTrustRef
+-	osStatusResult := C.SecTrustCreateWithCertificates(C.CFTypeRef(certRef), C.CFTypeRef(policy), &trustRef)
++	osStatusResult := C.SecTrustCreateWithCertificates(certArray, C.CFTypeRef(policy), &trustRef)
+ 	if err := osStatusError(osStatusResult); err != nil {
+ 		return nil, err
+ 	}
+ 	defer C.CFRelease(C.CFTypeRef(trustRef))
+ 
+-	// Evaluate trust to populate the certificate chain; ignore the trust
+-	// result since we only need the chain structure, not trust validation.
+-	var cfTrustErr C.CFErrorRef
+-	C.SecTrustEvaluateWithError(trustRef, &cfTrustErr)
+-	if cfTrustErr != nilCFErrorRef {
+-		// ignore the error since we only care about the chain, not trust validation.
++	// Evaluation populates chain data. Its trust result is deliberately ignored
++	// because callers need the chain structure even for an untrusted identity.
++	var trustResult C.SecTrustResultType
++	if err := osStatusError(C.SecTrustEvaluate(trustRef, &trustResult)); err != nil {
++		return nil, err
+ 	}
+ 
+-	certChain := C.SecTrustCopyCertificateChain(trustRef)
+-	if certChain == nilCFArrayRef {
++	// Snow Leopard's newer-looking trust accessors are unimplemented stubs.
++	// The older result API returns the evaluated chain when both outputs exist.
++	var chainRef C.CFArrayRef
++	if err := osStatusError(C.certstoreTrustCopyChain(trustRef, &chainRef)); err != nil {
++		return nil, err
++	}
++	if chainRef == nilCFArrayRef {
+ 		return nil, errors.New("error getting certificate chain")
+ 	}
+-	defer C.CFRelease(C.CFTypeRef(certChain))
++	defer C.CFRelease(C.CFTypeRef(chainRef))
+ 
+-	nchain := C.CFArrayGetCount(certChain)
++	nchain := C.CFArrayGetCount(chainRef)
++	if nchain == 0 {
++		return nil, errors.New("error getting certificate chain")
++	}
+ 	chain := make([]*x509.Certificate, 0, int(nchain))
+ 
+ 	for j := C.CFIndex(0); j < nchain; j++ {
+-		chainCertref := C.SecCertificateRef(C.CFArrayGetValueAtIndex(certChain, j))
++		// The array owns its certificate values.
++		chainCertref := C.SecCertificateRef(C.CFArrayGetValueAtIndex(chainRef, j))
+ 		if chainCertref == nilSecCertificateRef {
+ 			return nil, errors.New("nil certificate in chain")
+ 		}
+@@ -210,24 +302,21 @@ func (i *macIdentity) Signer() (crypto.Signer, error) {
+ 
+ // Delete implements the Identity interface.
+ func (i *macIdentity) Delete() error {
+-	itemList := []C.SecIdentityRef{i.ref}
+-	itemListPtr := (*unsafe.Pointer)(unsafe.Pointer(&itemList[0]))
+-	citemList := C.CFArrayCreate(nilCFAllocatorRef, itemListPtr, 1, nil)
+-	if citemList == nilCFArrayRef {
+-		return errors.New("error creating CFArray")
++	keyRef, err := i.getKeyRef()
++	if err != nil {
++		return err
+ 	}
+-	defer C.CFRelease(C.CFTypeRef(citemList))
+-
+-	query := mapToCFDictionary(map[C.CFTypeRef]C.CFTypeRef{
+-		C.CFTypeRef(C.kSecClass):         C.CFTypeRef(C.kSecClassIdentity),
+-		C.CFTypeRef(C.kSecMatchItemList): C.CFTypeRef(citemList),
+-	})
+-	if query == nilCFDictionaryRef {
+-		return errors.New("error creating CFDictionary")
++	certRef, err := i.getCertRef()
++	if err != nil {
++		return err
+ 	}
+-	defer C.CFRelease(C.CFTypeRef(query))
+ 
+-	if err := osStatusError(C.SecItemDelete(query)); err != nil {
++	// Snow Leopard's SecItem API only handles Internet passwords. Identity
++	// deletion therefore removes both keychain items that form the identity.
++	if err := osStatusError(C.SecKeychainItemDelete(C.SecKeychainItemRef(keyRef))); err != nil {
++		return err
++	}
++	if err := osStatusError(C.SecKeychainItemDelete(C.SecKeychainItemRef(certRef))); err != nil {
+ 		return err
+ 	}
+ 
+@@ -263,10 +352,10 @@ func (i *macIdentity) Public() crypto.PublicKey {
+ }
+ 
+ // Sign implements the crypto.Signer interface.
+-func (i *macIdentity) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+-	hash := opts.HashFunc()
++func (i *macIdentity) Sign(random io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
++	hashFunc := opts.HashFunc()
+ 
+-	if len(digest) != hash.Size() {
++	if !hashFunc.Available() || len(digest) != hashFunc.Size() {
+ 		return nil, errors.New("bad digest for hash")
+ 	}
+ 
+@@ -275,89 +364,155 @@ func (i *macIdentity) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts
+ 		return nil, err
+ 	}
+ 
+-	cdigest, err := bytesToCFData(digest)
++	cert, err := i.Certificate()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	defer C.CFRelease(C.CFTypeRef(cdigest))
+ 
+-	algo, err := i.getAlgo(opts)
+-	if err != nil {
+-		return nil, err
+-	}
++	switch publicKey := cert.PublicKey.(type) {
++	case *rsa.PublicKey:
++		switch hashFunc {
++		case crypto.SHA256, crypto.SHA384, crypto.SHA512:
++		default:
++			return nil, ErrUnsupportedHash
++		}
++		encoded := digest
++		padding := C.SecPadding(C.kSecPaddingPKCS1)
++		if _, ok := opts.(*rsa.PSSOptions); ok {
++			// SecKey's fixed PSS algorithms use a salt the size of the hash.
++			// Match that API, which the current implementation uses on newer macOS.
++			encoded, err = encodePSS(publicKey, random, digest, hashFunc, rsa.PSSSaltLengthEqualsHash)
++			padding = C.SecPadding(C.kSecPaddingNone)
++		} else {
++			encoded, err = encodePKCS1DigestInfo(hashFunc, digest)
++		}
++		if err != nil {
++			return nil, err
++		}
++		cssmPadding := C.CSSM_PADDING(C.CSSM_PADDING_PKCS1)
++		if padding == C.kSecPaddingNone {
++			cssmPadding = C.CSSM_PADDING(C.CSSM_PADDING_NONE)
++		}
++		return cssmSign(kref, C.CSSM_ALGID_RSA, cssmPadding, true, encoded, publicKey.Size())
+ 
+-	// sign the digest
+-	var cerr C.CFErrorRef
+-	csig := C.SecKeyCreateSignature(kref, algo, cdigest, &cerr)
++	case *ecdsa.PublicKey:
++		switch hashFunc {
++		case crypto.SHA256, crypto.SHA384, crypto.SHA512:
++		default:
++			return nil, ErrUnsupportedHash
++		}
++		fieldSize := (publicKey.Params().BitSize + 7) / 8
++		return cssmSign(kref, C.CSSM_ALGID_ECDSA, C.CSSM_PADDING_NONE, false, digest, 2*fieldSize+16)
+ 
+-	if err := cfErrorError(cerr); err != nil {
+-		defer C.CFRelease(C.CFTypeRef(cerr))
++	default:
++		return nil, errors.New("unsupported key type")
++	}
++}
+ 
++func cssmSign(key C.SecKeyRef, algorithm C.CSSM_ALGORITHMS, padding C.CSSM_PADDING, setPadding bool, data []byte, size int) ([]byte, error) {
++	signature := make([]byte, size)
++	signatureLen := C.size_t(len(signature))
++	usePadding := C.Boolean(0)
++	if setPadding {
++		usePadding = 1
++	}
++	status := C.certstoreSign(
++		key,
++		algorithm,
++		padding,
++		usePadding,
++		(*C.uint8_t)(unsafe.Pointer(&data[0])),
++		C.size_t(len(data)),
++		(*C.uint8_t)(unsafe.Pointer(&signature[0])),
++		&signatureLen,
++	)
++	if err := osStatusError(status); err != nil {
+ 		return nil, err
+ 	}
+-
+-	if csig == nilCFDataRef {
+-		return nil, errors.New("nil signature from SecKeyCreateSignature")
++	if signatureLen > C.size_t(len(signature)) {
++		return nil, errors.New("invalid signature length")
+ 	}
+ 
+-	defer C.CFRelease(C.CFTypeRef(csig))
++	return signature[:int(signatureLen)], nil
++}
+ 
+-	sig := cfDataToBytes(csig)
++func encodePKCS1DigestInfo(hashFunc crypto.Hash, digest []byte) ([]byte, error) {
++	var prefix []byte
++	switch hashFunc {
++	case crypto.SHA256:
++		prefix = []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
++	case crypto.SHA384:
++		prefix = []byte{0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30}
++	case crypto.SHA512:
++		prefix = []byte{0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40}
++	default:
++		return nil, ErrUnsupportedHash
++	}
+ 
+-	return sig, nil
++	return append(prefix, digest...), nil
+ }
+ 
+-// getAlgo decides which algorithm to use with this key type for the given hash.
+-func (i *macIdentity) getAlgo(opts crypto.SignerOpts) (algo C.SecKeyAlgorithm, err error) {
+-	hash := opts.HashFunc()
+-	var crt *x509.Certificate
+-	if crt, err = i.Certificate(); err != nil {
+-		return
++func encodePSS(publicKey *rsa.PublicKey, random io.Reader, digest []byte, hashFunc crypto.Hash, saltLength int) ([]byte, error) {
++	emBits := publicKey.N.BitLen() - 1
++	emLen := (emBits + 7) / 8
++	hashLength := hashFunc.Size()
++
++	switch saltLength {
++	case rsa.PSSSaltLengthAuto:
++		saltLength = emLen - hashLength - 2
++	case rsa.PSSSaltLengthEqualsHash:
++		saltLength = hashLength
++	}
++	if saltLength < 0 || emLen < hashLength+saltLength+2 {
++		return nil, errors.New("invalid PSS salt length")
++	}
++	if random == nil {
++		random = cryptorand.Reader
+ 	}
+ 
+-	switch crt.PublicKey.(type) {
+-	case *ecdsa.PublicKey:
+-		switch hash {
+-		case crypto.SHA256:
+-			algo = C.kSecKeyAlgorithmECDSASignatureDigestX962SHA256
+-		case crypto.SHA384:
+-			algo = C.kSecKeyAlgorithmECDSASignatureDigestX962SHA384
+-		case crypto.SHA512:
+-			algo = C.kSecKeyAlgorithmECDSASignatureDigestX962SHA512
+-		default:
+-			err = ErrUnsupportedHash
+-		}
+-	case *rsa.PublicKey:
+-		if _, ok := opts.(*rsa.PSSOptions); ok {
+-			switch hash {
+-			case crypto.SHA256:
+-				algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA256
+-			case crypto.SHA384:
+-				algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA384
+-			case crypto.SHA512:
+-				algo = C.kSecKeyAlgorithmRSASignatureDigestPSSSHA512
+-			default:
+-				err = ErrUnsupportedHash
+-			}
++	salt := make([]byte, saltLength)
++	if _, err := io.ReadFull(random, salt); err != nil {
++		return nil, err
++	}
+ 
+-			return
+-		}
++	digestHash := hashFunc.New()
++	digestHash.Write(make([]byte, 8))
++	digestHash.Write(digest)
++	digestHash.Write(salt)
++	h := digestHash.Sum(nil)
+ 
+-		switch hash {
+-		case crypto.SHA256:
+-			algo = C.kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256
+-		case crypto.SHA384:
+-			algo = C.kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA384
+-		case crypto.SHA512:
+-			algo = C.kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA512
+-		default:
+-			err = ErrUnsupportedHash
+-		}
+-	default:
+-		err = errors.New("unsupported key type")
++	db := make([]byte, emLen-hashLength-1)
++	db[len(db)-saltLength-1] = 1
++	copy(db[len(db)-saltLength:], salt)
++	mask := mgf1(hashFunc.New(), h, len(db))
++	for j := range db {
++		db[j] ^= mask[j]
+ 	}
++	db[0] &= byte(0xff >> (8*emLen - emBits))
+ 
+-	return
++	encoded := make([]byte, 0, emLen)
++	encoded = append(encoded, db...)
++	encoded = append(encoded, h...)
++	encoded = append(encoded, 0xbc)
++	return encoded, nil
++}
++
++func mgf1(h hash.Hash, seed []byte, length int) []byte {
++	mask := make([]byte, 0, length)
++	var counter [4]byte
++	for len(mask) < length {
++		h.Reset()
++		h.Write(seed)
++		h.Write(counter[:])
++		mask = h.Sum(mask)
++		for j := len(counter) - 1; j >= 0; j-- {
++			counter[j]++
++			if counter[j] != 0 {
++				break
++			}
++		}
++	}
++	return mask[:length]
+ }
+ 
+ // getKeyRef gets the SecKeyRef for this identity's pricate key.

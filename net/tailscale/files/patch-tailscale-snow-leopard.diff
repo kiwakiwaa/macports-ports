@@ -1,0 +1,587 @@
+diff --git a/hostinfo/hostinfo_darwin.go b/hostinfo/hostinfo_darwin.go
+index 338ab97..6d3f6fc 100644
+--- a/hostinfo/hostinfo_darwin.go
++++ b/hostinfo/hostinfo_darwin.go
+@@ -7,7 +7,9 @@
+ 
+ import (
+ 	"os"
++	"os/exec"
+ 	"path/filepath"
++	"strings"
+ 
+ 	"golang.org/x/sys/unix"
+ )
+@@ -30,8 +32,15 @@ func packageTypeDarwin() string {
+ // Returns the marketing version (e.g., "15.0.1" or "26.0.0")
+ func osVersionDarwin() string {
+ 	version, err := unix.Sysctl("kern.osproductversion")
++	if err == nil {
++		return version
++	}
++
++	// kern.osproductversion was added after Snow Leopard. sw_vers is the
++	// public compatibility interface on older macOS releases.
++	out, err := exec.Command("/usr/bin/sw_vers", "-productVersion").Output()
+ 	if err != nil {
+ 		return ""
+ 	}
+-	return version
++	return strings.TrimSpace(string(out))
+ }
+diff --git a/drive/driveimpl/dirfs/dirfs_test.go b/drive/driveimpl/dirfs/dirfs_test.go
+index 559160716..ea8126145 100644
+--- a/drive/driveimpl/dirfs/dirfs_test.go
++++ b/drive/driveimpl/dirfs/dirfs_test.go
+@@ -292,11 +292,11 @@ func createFileSystem(t *testing.T) (webdav.FileSystem, string, string, *tstest.
+ 	}
+ 
+ 	// make some directories
+-	err = os.Mkdir(filepath.Join(dir1, "dir1"), 0666)
++	err = os.Mkdir(filepath.Join(dir1, "dir1"), 0777)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	err = os.Mkdir(filepath.Join(dir2, "dir2"), 0666)
++	err = os.Mkdir(filepath.Join(dir2, "dir2"), 0777)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/feature/acme/cert_test.go b/feature/acme/cert_test.go
+index 7c39ea86c..bd88867c9 100644
+--- a/feature/acme/cert_test.go
++++ b/feature/acme/cert_test.go
+@@ -659,6 +659,7 @@ func TestDebugACMEDirectoryURL(t *testing.T) {
+ 
+ func TestGetCertPEMWithValidity(t *testing.T) {
+ 	const testDomain = "example.com"
++	t.Cleanup(func() { envknob.Setenv("TS_CERT_SHARE_MODE", "") })
+ 	b := ipnlocaltest.NewBackend(t)
+ 	b.SetVarRoot(t.TempDir())
+ 	e := extOf(t, b)
+@@ -958,14 +959,14 @@ func TestAsyncRenewalDedup(t *testing.T) {
+ 	if pair == nil || !pair.Cached {
+ 		t.Fatalf("first GetCertPEMWithValidity = %+v, want cached cert", pair)
+ 	}
+-	if got := e.goroutinesStarted.Load() - prevGo; got != 1 {
+-		t.Fatalf("first call spawned %d goroutine(s), want 1 (async renewal started)", got)
+-	}
+ 	select {
+ 	case <-renewalStarted:
+ 	case <-time.After(5 * time.Second):
+ 		t.Fatal("timed out waiting for async renewal to enter getCertPEM")
+ 	}
++	if got := e.goroutinesStarted.Load() - prevGo; got != 1 {
++		t.Fatalf("first call spawned %d goroutine(s), want 1 (async renewal started)", got)
++	}
+ 
+ 	// A second trigger while the renewal is still in flight must be
+ 	// deduplicated: no new goroutine.
+diff --git a/logtail/filch/filch.go b/logtail/filch/filch.go
+index 8ae912306..65304d061 100644
+--- a/logtail/filch/filch.go
++++ b/logtail/filch/filch.go
+@@ -437,11 +437,13 @@ func New(filePrefix string, opts Options) (f *Filch, err error) {
+ 	path1 := filePrefix + ".log1.txt"
+ 	path2 := filePrefix + ".log2.txt"
+ 
+-	f1, err = os.OpenFile(path1, os.O_CREATE|os.O_RDWR, 0600)
++	// O_APPEND keeps direct and filched stderr writes from racing over the
++	// shared file offset on older Darwin kernels.
++	f1, err = os.OpenFile(path1, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	f2, err = os.OpenFile(path2, os.O_CREATE|os.O_RDWR, 0600)
++	f2, err = os.OpenFile(path2, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/logtail/filch/filch_test.go b/logtail/filch/filch_test.go
+index 2538233cf..094a39dd9 100644
+--- a/logtail/filch/filch_test.go
++++ b/logtail/filch/filch_test.go
+@@ -188,10 +188,12 @@ func TestConcurrentWriteAndRead(t *testing.T) {
+ 			}
+ 		} else {
+ 			// Synchronous reading of all lines.
+-			draining.Lock()
+-			for checkLine() {
+-			}
+-			draining.Unlock()
++			func() {
++				draining.Lock()
++				defer draining.Unlock()
++				for checkLine() {
++				}
++			}()
+ 		}
+ 	}
+ }
+diff --git a/net/netcheck/netcheck_test.go b/net/netcheck/netcheck_test.go
+index 70c07aacd..4a745ce6b 100644
+--- a/net/netcheck/netcheck_test.go
++++ b/net/netcheck/netcheck_test.go
+@@ -995,7 +995,7 @@ func TestNodeAddrResolve(t *testing.T) {
+ 	dnV4Only := &tailcfg.DERPNode{
+ 		Name:     "derptest1b",
+ 		RegionID: 901,
+-		HostName: "ipv4.google.com",
++		HostName: "v4-only.invalid",
+ 		// No IPv4 or IPv6 addrs
+ 	}
+ 
+diff --git a/ssh/tailssh/tailssh_test.go b/ssh/tailssh/tailssh_test.go
+index 30855272f..dfc6a153b 100644
+--- a/ssh/tailssh/tailssh_test.go
++++ b/ssh/tailssh/tailssh_test.go
+@@ -1162,7 +1162,7 @@ func TestSSH(t *testing.T) {
+ 	execSSH := func(args ...string) *exec.Cmd {
+ 		cmd := exec.Command("ssh",
+ 			"-F",
+-			"none",
++			"/dev/null",
+ 			"-v",
+ 			"-p", fmt.Sprint(port),
+ 			"-o", "StrictHostKeyChecking=no",
+diff --git a/util/osuser/user.go b/util/osuser/user.go
+index 3fdbfbbd3..481a3115a 100644
+--- a/util/osuser/user.go
++++ b/util/osuser/user.go
+@@ -106,6 +106,13 @@ func lookup(usernameOrUID string, std lookupStd, wantShell bool) (*user.User, st
+ 		}, "/bin/rc", nil
+ 	}
+ 
++	// Darwin has no system getent. os/user supplies directory-service
++	// identity data, and callers obtain the login shell with dscl.
++	if runtime.GOOS == "darwin" {
++		u, err := std(usernameOrUID)
++		return u, "", err
++	}
++
+	// Start with getent if caller wants to get the user shell.
+	if wantShell {
+		return userLookupGetent(usernameOrUID, std)
+diff --git a/ipn/ipnlocal/breaktcp_darwin.go b/ipn/ipnlocal/breaktcp_darwin.go
+index a97f43e..2fc2648 100644
+--- a/ipn/ipnlocal/breaktcp_darwin.go
++++ b/ipn/ipnlocal/breaktcp_darwin.go
+@@ -17,6 +17,9 @@ func breakTCPConnsDarwin() error {
+ 	var matched int
+ 	for fd := range 1000 {
+ 		_, err := unix.GetsockoptTCPConnectionInfo(fd, unix.IPPROTO_TCP, unix.TCP_CONNECTION_INFO)
++		if err == unix.ENOPROTOOPT && isConnectedInetStream(fd) {
++			err = nil
++		}
+ 		if err == nil {
+ 			matched++
+ 			err = unix.Close(fd)
+@@ -28,3 +31,20 @@ func breakTCPConnsDarwin() error {
+ 	}
+ 	return nil
+ }
++
++func isConnectedInetStream(fd int) bool {
++	socketType, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
++	if err != nil || socketType != unix.SOCK_STREAM {
++		return false
++	}
++	peer, err := unix.Getpeername(fd)
++	if err != nil {
++		return false
++	}
++	switch peer.(type) {
++	case *unix.SockaddrInet4, *unix.SockaddrInet6:
++		return true
++	default:
++		return false
++	}
++}
+diff --git a/ipn/ipnlocal/extension_host.go b/ipn/ipnlocal/extension_host.go
+index 1db183a..547dc62 100644
+--- a/ipn/ipnlocal/extension_host.go
++++ b/ipn/ipnlocal/extension_host.go
+@@ -577,7 +577,6 @@ func (h *ExtensionHost) shutdown() {
+ }
+ 
+ func (h *ExtensionHost) shutdownWorkQueue() {
+-	h.workQueue.Shutdown()
+ 	var ctx context.Context
+ 	if testenv.InTest() {
+ 		// In tests, we'd like to wait indefinitely for the current operation to finish,
+@@ -593,7 +592,7 @@ func (h *ExtensionHost) shutdownWorkQueue() {
+ 	}
+ 	// Since callbacks are invoked synchronously, this will also wait
+ 	// for in-flight callbacks associated with those operations to finish.
+-	if err := h.workQueue.Wait(ctx); err != nil {
++	if err := h.workQueue.ShutdownAndWait(ctx); err != nil {
+ 		h.logf("work queue shutdown failed: %v", err)
+ 	}
+ }
+@@ -641,6 +640,5 @@ func (h *ExtensionHost) enqueueBackendOperation(f func(Backend)) {
+ // to allow testing with a mock implementation.
+ type execQueue interface {
+ 	Add(func())
+-	Shutdown()
+-	Wait(context.Context) error
++	ShutdownAndWait(context.Context) error
+ }
+diff --git a/ipn/ipnlocal/extension_host_test.go b/ipn/ipnlocal/extension_host_test.go
+index 58955dc..93d5507 100644
+--- a/ipn/ipnlocal/extension_host_test.go
++++ b/ipn/ipnlocal/extension_host_test.go
+@@ -1350,11 +1350,8 @@ func (q *testExecQueue) Drain() {
+ 	}
+ }
+ 
+-// Shutdown implements [execQueue].
+-func (q *testExecQueue) Shutdown() {}
+-
+-// Wait implements [execQueue].
+-func (q *testExecQueue) Wait(context.Context) error { return nil }
++// ShutdownAndWait implements [execQueue].
++func (q *testExecQueue) ShutdownAndWait(context.Context) error { return nil }
+ 
+ // testBackend implements [ipnext.Backend] for testing purposes
+ // by calling the provided hooks when its methods are called.
+diff --git a/net/netmon/interfaces_darwin_test.go b/net/netmon/interfaces_darwin_test.go
+index e4b84a1..25a86ac 100644
+--- a/net/netmon/interfaces_darwin_test.go
++++ b/net/netmon/interfaces_darwin_test.go
+@@ -72,20 +72,26 @@ func likelyHomeRouterIPDarwinExec() (ret netip.Addr, netif string, ok bool) {
+ 	defer io.Copy(io.Discard, stdout) // clear the pipe to prevent hangs
+ 
+ 	var f []mem.RO
++	netifField := -1
+ 	for lr := range lineiter.Reader(stdout) {
+ 		lineb, err := lr.Value()
+ 		if err != nil {
+ 			break
+ 		}
+ 		line := mem.B(lineb)
+-		if !mem.Contains(line, mem.S("default")) {
++		f = mem.AppendFields(f[:0], line)
++		if len(f) > 0 && f[0].EqualString("Destination") {
++			for i := range f {
++				if f[i].EqualString("Netif") {
++					netifField = i
++				}
++			}
+ 			continue
+ 		}
+-		f = mem.AppendFields(f[:0], line)
+-		if len(f) < 4 || !f[0].EqualString("default") {
++		if netifField < 0 || len(f) <= netifField || !f[0].EqualString("default") {
+ 			continue
+ 		}
+-		ipm, flagsm, netifm := f[1], f[2], f[3]
++		ipm, flagsm, netifm := f[1], f[2], f[netifField]
+ 		if !mem.Contains(flagsm, mem.S("G")) {
+ 			continue
+ 		}
+diff --git a/net/netns/netns_darwin.go b/net/netns/netns_darwin.go
+index 844128d..a273753 100644
+--- a/net/netns/netns_darwin.go
++++ b/net/netns/netns_darwin.go
+@@ -305,11 +305,16 @@ func bindConnToInterface(c syscall.RawConn, network, address string, ifIndex int
+ 	err := c.Control(func(fd uintptr) {
+ 		sockErr = unix.SetsockoptInt(int(fd), proto, opt, ifIndex)
+ 	})
+-	if sockErr != nil {
+-		logf("[unexpected] netns: bindConnToInterface(%q, %q), v6=%v, index=%v: %v", network, address, v6, ifIndex, sockErr)
+-	}
+ 	if err != nil {
+ 		return fmt.Errorf("RawConn.Control on %T: %w", c, err)
+ 	}
++	if v6 && errors.Is(sockErr, unix.ENOPROTOOPT) {
++		// Snow Leopard has no IPV6_BOUND_IF. Keep IPv6 usable by falling
++		// back to the kernel's selected route, as unbound sockets normally do.
++		return nil
++	}
++	if sockErr != nil {
++		logf("[unexpected] netns: bindConnToInterface(%q, %q), v6=%v, index=%v: %v", network, address, v6, ifIndex, sockErr)
++	}
+ 	return sockErr
+ }
+diff --git a/net/tcpinfo/tcpinfo_test.go b/net/tcpinfo/tcpinfo_test.go
+index 6baac93..6b3584d 100644
+--- a/net/tcpinfo/tcpinfo_test.go
++++ b/net/tcpinfo/tcpinfo_test.go
+@@ -5,9 +5,11 @@
+ 
+ import (
+ 	"bytes"
++	"errors"
+ 	"io"
+ 	"net"
+ 	"runtime"
++	"syscall"
+ 	"testing"
+ )
+ 
+@@ -53,6 +55,9 @@ func TestRTT(t *testing.T) {
+ 
+ 	// Get the RTT now
+ 	rtt, err := RTT(conn)
++	if errors.Is(err, syscall.ENOPROTOOPT) {
++		t.Skip("Snow Leopard has no TCP_CONNECTION_INFO")
++	}
+ 	if err != nil {
+ 		t.Fatalf("error getting RTT: %v", err)
+ 	}
+diff --git a/wgengine/magicsock/magicsock_test.go b/wgengine/magicsock/magicsock_test.go
+index 488c2e5..10b6b29 100644
+--- a/wgengine/magicsock/magicsock_test.go
++++ b/wgengine/magicsock/magicsock_test.go
+@@ -52,6 +52,7 @@
+ 	"tailscale.com/net/netaddr"
+ 	"tailscale.com/net/netcheck"
+ 	"tailscale.com/net/netmon"
++	"tailscale.com/net/netns"
+ 	"tailscale.com/net/packet"
+ 	"tailscale.com/net/ping"
+ 	"tailscale.com/net/routemanager"
+@@ -3535,6 +3536,12 @@ func TestNetworkSendErrors(t *testing.T) {
+ 		if runtime.GOOS == "windows" {
+ 			t.Skipf("skipping on %s", runtime.GOOS)
+ 		}
++		if runtime.GOOS == "darwin" {
++			// Snow Leopard cannot send loopback traffic from an interface-bound
++			// UDP socket. This test exercises metrics, not interface selection.
++			netns.SetDisableBindConnToInterface(t.Logf, true)
++			t.Cleanup(func() { netns.SetDisableBindConnToInterface(t.Logf, false) })
++		}
+ 
+ 		conn, reg := newTestConnAndRegistry(t)
+ 		conn.checkNetworkUpDuringTests = true
+diff --git a/wgengine/userspace_test.go b/wgengine/userspace_test.go
+index efe2e04..53d9aab 100644
+--- a/wgengine/userspace_test.go
++++ b/wgengine/userspace_test.go
+@@ -16,6 +16,7 @@
+ 	"runtime"
+ 	"slices"
+ 	"sync"
++	"syscall"
+ 	"testing"
+ 	"time"
+ 
+@@ -288,6 +289,9 @@ func TestUserspaceEnginePeerMTUReconfig(t *testing.T) {
+ 		t.Error("peer MTU enabled by default, should not be")
+ 	}
+ 	osDefaultDF, err := ue.magicConn.DontFragSetting()
++	if errors.Is(err, syscall.ENOPROTOOPT) {
++		t.Skip("Snow Leopard has no UDP don't-fragment socket options")
++	}
+	if err != nil {
+		t.Errorf("get don't fragment bit failed: %v", err)
+	}
++diff --git a/tstest/integration/integration_test.go b/tstest/integration/integration_test.go
+index 8a894c7cf..5ec800948 100644
+--- a/tstest/integration/integration_test.go
++++ b/tstest/integration/integration_test.go
+@@ -1873,6 +1873,7 @@ func TestNetstackTCPLoopback(t *testing.T) {
+ 	writeBufIterations := 100 // allow TCP send window to open up
+ 	wantTotal := writeBufSize * writeBufIterations
+ 
++caseLoop:
+ 	for _, c := range cases {
+ 		lis, err := net.Listen(c.network, c.lisAddr)
+ 		if err != nil {
+@@ -1955,7 +1956,7 @@ func TestNetstackTCPLoopback(t *testing.T) {
+ 				}
+ 				lisSteps++
+ 				if dialerSteps == 2 && lisSteps == 2 {
+-					return
++					continue caseLoop
+ 				}
+ 			case dialerErr := <-dialerStepCh:
+ 				if dialerErr != nil {
+@@ -1963,7 +1964,7 @@ func TestNetstackTCPLoopback(t *testing.T) {
+ 				}
+ 				dialerSteps++
+ 				if dialerSteps == 2 && lisSteps == 2 {
+-					return
++					continue caseLoop
+ 				}
+ 			}
+ 		}
+diff --git a/wgengine/router/osrouter/router_userspace_bsd.go b/wgengine/router/osrouter/router_userspace_bsd.go
+index 272594d7c..c553140d6 100644
+--- a/wgengine/router/osrouter/router_userspace_bsd.go
++++ b/wgengine/router/osrouter/router_userspace_bsd.go
+@@ -11,9 +11,12 @@
+ 	"net/netip"
+ 	"os/exec"
+ 	"runtime"
++	"strconv"
++	"strings"
+ 
+ 	"github.com/tailscale/wireguard-go/tun"
+ 	"go4.org/netipx"
++	"golang.org/x/sys/unix"
+ 	"tailscale.com/health"
+ 	"tailscale.com/net/netmon"
+ 	"tailscale.com/net/tsaddr"
+@@ -106,6 +109,43 @@ func inet(p netip.Prefix) string {
+ 	return "inet"
+ }
+ 
++func routeDestination(p netip.Prefix) []string {
++	net := netipx.PrefixIPNet(p)
++	nip := net.IP.Mask(net.Mask)
++	if p.Addr().Is6() {
++		// Snow Leopard's route rejects IPv6 CIDR operands. The documented
++		// -prefixlen form also works on newer Darwin and FreeBSD releases.
++		return []string{nip.String(), "-prefixlen", strconv.Itoa(p.Bits())}
++	}
++	return []string{fmt.Sprintf("%v/%d", nip, p.Bits())}
++}
++
++func isSnowLeopard() bool {
++	release, err := unix.Sysctl("kern.osrelease")
++	return err == nil && isSnowLeopardRelease(runtime.GOOS, release)
++}
++
++func isSnowLeopardRelease(goos, release string) bool {
++	return goos == "darwin" && strings.HasPrefix(release, "10.")
++}
++
++func addressAddArgs(tunname string, addr netip.Prefix, snowLeopard bool) []string {
++	if runtime.GOOS == "freebsd" && addr.Addr().Is6() && addr.Bits() == 128 {
++		// FreeBSD rejects tun addresses of the form fc00::1/128 -> fc00::1,
++		// https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=218508
++		// Instead add our whole /48, which works because we use a /48 route.
++		// Full history: https://github.com/tailscale/tailscale/issues/1307
++		tmp := netip.PrefixFrom(addr.Addr(), 48)
++		return []string{"ifconfig", tunname, inet(tmp), tmp.String()}
++	}
++	if snowLeopard && addr.Addr().Is6() {
++		// Snow Leopard leaves an IPv6 point-to-point address tentative when
++		// its peer equals itself. A local prefix lets DAD complete normally.
++		return []string{"ifconfig", tunname, inet(addr), addr.Addr().String(), "prefixlen", strconv.Itoa(addr.Bits())}
++	}
++	return []string{"ifconfig", tunname, inet(addr), addr.String(), addr.Addr().String()}
++}
++
+ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 	if cfg == nil {
+ 		cfg = &shutdownConfig
+@@ -132,17 +172,7 @@ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 		}
+ 	}
+ 	for _, addr := range r.addrsToAdd(cfg.LocalAddrs) {
+-		var arg []string
+-		if runtime.GOOS == "freebsd" && addr.Addr().Is6() && addr.Bits() == 128 {
+-			// FreeBSD rejects tun addresses of the form fc00::1/128 -> fc00::1,
+-			// https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=218508
+-			// Instead add our whole /48, which works because we use a /48 route.
+-			// Full history: https://github.com/tailscale/tailscale/issues/1307
+-			tmp := netip.PrefixFrom(addr.Addr(), 48)
+-			arg = []string{"ifconfig", r.tunname, inet(tmp), tmp.String()}
+-		} else {
+-			arg = []string{"ifconfig", r.tunname, inet(addr), addr.String(), addr.Addr().String()}
+-		}
++		arg := addressAddArgs(r.tunname, addr, isSnowLeopard())
+ 		out, err := cmd(arg...).CombinedOutput()
+ 		if err != nil {
+ 			r.logf("addr add failed: %v => %v\n%s", arg, err, out)
+@@ -163,16 +193,13 @@ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 	// Delete any preexisting routes.
+ 	for route := range r.routes {
+ 		if resetRoutes || !newRoutes[route] {
+-			net := netipx.PrefixIPNet(route)
+-			nip := net.IP.Mask(net.Mask)
+-			nstr := fmt.Sprintf("%v/%d", nip, route.Bits())
+ 			del := "del"
+ 			if version.OS() == "macOS" {
+ 				del = "delete"
+ 			}
+-			routedel := []string{"route", "-q", "-n",
+-				del, "-" + inet(route), nstr,
+-				"-iface", r.tunname}
++			routedel := []string{"route", "-q", "-n", del, "-" + inet(route)}
++			routedel = append(routedel, routeDestination(route)...)
++			routedel = append(routedel, "-iface", r.tunname)
+ 			out, err := cmd(routedel...).CombinedOutput()
+ 			if err != nil {
+ 				r.logf("route del failed: %v: %v\n%s", routedel, err, out)
+@@ -183,12 +210,9 @@ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 	// Add the routes.
+ 	for route := range newRoutes {
+ 		if resetRoutes || !r.routes[route] {
+-			net := netipx.PrefixIPNet(route)
+-			nip := net.IP.Mask(net.Mask)
+-			nstr := fmt.Sprintf("%v/%d", nip, route.Bits())
+-			routeadd := []string{"route", "-q", "-n",
+-				"add", "-" + inet(route), nstr,
+-				"-iface", r.tunname}
++			routeadd := []string{"route", "-q", "-n", "add", "-" + inet(route)}
++			routeadd = append(routeadd, routeDestination(route)...)
++			routeadd = append(routeadd, "-iface", r.tunname)
+ 			out, err := cmd(routeadd...).CombinedOutput()
+ 			if err != nil {
+ 				r.logf("addr add failed: %v: %v\n%s", routeadd, err, out)
+diff --git a/wgengine/router/osrouter/router_userspace_bsd_test.go b/wgengine/router/osrouter/router_userspace_bsd_test.go
+new file mode 100644
+index 000000000..1660472be
+--- /dev/null
++++ b/wgengine/router/osrouter/router_userspace_bsd_test.go
+@@ -0,0 +1,57 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build darwin || freebsd
++
++package osrouter
++
++import (
++	"net/netip"
++	"slices"
++	"testing"
++)
++
++func TestRouteDestination(t *testing.T) {
++	tests := []struct {
++		prefix string
++		want   []string
++	}{
++		{"100.64.0.1/32", []string{"100.64.0.1/32"}},
++		{"100.64.0.1/10", []string{"100.64.0.0/10"}},
++		{"fd7a:115c:a1e0::53/128", []string{"fd7a:115c:a1e0::53", "-prefixlen", "128"}},
++		{"fd7a:115c:a1e0:ffff::1/48", []string{"fd7a:115c:a1e0::", "-prefixlen", "48"}},
++	}
++	for _, tt := range tests {
++		t.Run(tt.prefix, func(t *testing.T) {
++			got := routeDestination(netip.MustParsePrefix(tt.prefix))
++			if !slices.Equal(got, tt.want) {
++				t.Fatalf("routeDestination(%q) = %q, want %q", tt.prefix, got, tt.want)
++			}
++		})
++	}
++}
++
++func TestAddressAddArgs(t *testing.T) {
++	addr := netip.MustParsePrefix("fd7a:115c:a1e0:ab12:4843:cd96:6240:1/128")
++	want := []string{"ifconfig", "utun0", "inet6", addr.Addr().String(), "prefixlen", "128"}
++	if got := addressAddArgs("utun0", addr, true); !slices.Equal(got, want) {
++		t.Fatalf("addressAddArgs Snow Leopard = %q, want %q", got, want)
++	}
++}
++
++func TestIsSnowLeopard(t *testing.T) {
++	tests := []struct {
++		goos    string
++		release string
++		want    bool
++	}{
++		{"darwin", "10.8.0", true},
++		{"darwin", "11.4.2", false},
++		{"freebsd", "10.8.0", false},
++	}
++	for _, tt := range tests {
++		if got := isSnowLeopardRelease(tt.goos, tt.release); got != tt.want {
++			t.Errorf("isSnowLeopardRelease(%q, %q) = %v, want %v", tt.goos, tt.release, got, tt.want)
++		}
++	}
++}

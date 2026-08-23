@@ -1,0 +1,34 @@
+diff --git a/peercred_darwin.go b/peercred_darwin.go
+index 4844c39..2370af0 100644
+--- a/peercred_darwin.go
++++ b/peercred_darwin.go
+@@ -45,6 +45,13 @@ func getUnix(c *net.UnixConn) (*Creds, error) {
+ 		pid, err = unix.GetsockoptInt(int(fd),
+ 			unix.SOL_LOCAL,
+ 			unix.LOCAL_PEERPID)
++		if err == unix.ENOPROTOOPT || err == unix.EOPNOTSUPP {
++			// Snow Leopard lacks LOCAL_PEERPID. LOCAL_PEERCRED above still
++			// authenticates the peer UID, while the PID remains optional metadata.
++			pid = 0
++			err = nil
++			return
++		}
+ 		if err != nil {
+ 			err = fmt.Errorf("unix.GetsockoptInt: %w", err)
+ 		}
+diff --git a/peercred_unix_test.go b/peercred_unix_test.go
+index c183c11..ae23feb 100644
+--- a/peercred_unix_test.go
++++ b/peercred_unix_test.go
+@@ -59,9 +59,9 @@ func TestUnixSock(t *testing.T) {
+ 		t.Errorf("UID = %q; want %q", got, want)
+ 	}
+ 	pid, ok := creds.PID()
+-	if runtime.GOOS == "freebsd" {
++	if runtime.GOOS == "freebsd" || runtime.GOOS == "darwin" {
+ 		if ok {
+-			t.Error("PID ok; want !ok. Thank you for fixing FreeBSD, please update the test.")
++			t.Error("PID ok; want !ok on a platform without peer PID support")
+ 		}
+ 	} else {
+ 		if !ok {

@@ -1,0 +1,134 @@
+diff --git a/prometheus/process_collector_darwin.go b/prometheus/process_collector_darwin.go
+index b32c95f..9a6e81f 100644
+--- a/prometheus/process_collector_darwin.go
++++ b/prometheus/process_collector_darwin.go
+@@ -17,7 +17,6 @@ package prometheus
+ 
+ import (
+ 	"errors"
+-	"fmt"
+ 	"os"
+ 	"syscall"
+ 	"time"
+@@ -72,15 +71,15 @@ func getOpenFileCount() (float64, error) {
+ }
+ 
+ func (c *processCollector) processCollect(ch chan<- Metric) {
+-	if procs, err := unix.SysctlKinfoProcSlice("kern.proc.pid", os.Getpid()); err == nil {
+-		if len(procs) == 1 {
+-			startTime := float64(procs[0].Proc.P_starttime.Nano() / 1e9)
++	pid, err := c.pidFn()
++	if err == nil {
++		var startTime float64
++		startTime, err = getStartTime(pid)
++		if err == nil {
+ 			ch <- MustNewConstMetric(c.startTime, GaugeValue, startTime)
+-		} else {
+-			err = fmt.Errorf("sysctl() returned %d proc structs (expected 1)", len(procs))
+-			c.reportError(ch, c.startTime, err)
+ 		}
+-	} else {
++	}
++	if err != nil && !errors.Is(err, errNotImplemented) {
+ 		c.reportError(ch, c.startTime, err)
+ 	}
+ 
+diff --git a/prometheus/process_collector_mem_cgo_darwin.c b/prometheus/process_collector_mem_cgo_darwin.c
+index d00a243..d0a49d2 100644
+--- a/prometheus/process_collector_mem_cgo_darwin.c
++++ b/prometheus/process_collector_mem_cgo_darwin.c
+@@ -16,6 +16,8 @@
+ #include <mach/mach_init.h>
+ #include <mach/task.h>
+ #include <mach/mach_vm.h>
++#include <errno.h>
++#include <sys/sysctl.h>
+ 
+ // The compiler warns that mach/shared_memory_server.h is deprecated, and to use
+ // mach/shared_region.h instead.  But that doesn't define
+@@ -25,6 +27,24 @@
+ #define SHARED_DATA_REGION_SIZE         0x10000000
+ #define SHARED_TEXT_REGION_SIZE         0x10000000
+ 
++int get_process_start_time(int pid, long long *sec, int *usec)
++{
++    int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
++    struct kinfo_proc process;
++    size_t size = sizeof(process);
++
++    if (sysctl(mib, 4, &process, &size, NULL, 0) != 0) {
++        return errno;
++    }
++    if (size == 0) {
++        return ESRCH;
++    }
++
++    *sec = process.kp_proc.p_starttime.tv_sec;
++    *usec = process.kp_proc.p_starttime.tv_usec;
++    return 0;
++}
++
+ 
+ int get_memory_info(unsigned long long *rss, unsigned long long *vsize)
+ {
+@@ -33,12 +53,14 @@ int get_memory_info(unsigned long long *rss, unsigned long long *vsize)
+ 
+     kern_return_t               error;
+     task_t                      task = MACH_PORT_NULL;
+-    mach_task_basic_info_data_t info;
+-    mach_msg_type_number_t      info_count = MACH_TASK_BASIC_INFO_COUNT;
++    // Snow Leopard predates MACH_TASK_BASIC_INFO. TASK_BASIC_INFO exposes the
++    // same resident and virtual size fields required by this collector.
++    task_basic_info_data_t      info;
++    mach_msg_type_number_t      info_count = TASK_BASIC_INFO_COUNT;
+ 
+     error = task_info(
+                 mach_task_self(),
+-                MACH_TASK_BASIC_INFO,
++                TASK_BASIC_INFO,
+                 (task_info_t) &info,
+                 &info_count );
+ 
+diff --git a/prometheus/process_collector_mem_cgo_darwin.go b/prometheus/process_collector_mem_cgo_darwin.go
+index 9ac53f9..329228f 100644
+--- a/prometheus/process_collector_mem_cgo_darwin.go
++++ b/prometheus/process_collector_mem_cgo_darwin.go
+@@ -17,9 +17,22 @@ package prometheus
+ 
+ /*
+ int get_memory_info(unsigned long long *rss, unsigned long long *vs);
++int get_process_start_time(int pid, long long *sec, int *usec);
+ */
+ import "C"
+-import "fmt"
++import (
++	"fmt"
++	"syscall"
++)
++
++func getStartTime(pid int) (float64, error) {
++	var sec C.longlong
++	var usec C.int
++	if err := C.get_process_start_time(C.int(pid), &sec, &usec); err != 0 {
++		return 0, syscall.Errno(err)
++	}
++	return float64(sec) + float64(usec)/1e6, nil
++}
+ 
+ func getMemory() (*memoryInfo, error) {
+ 	var rss, vsize C.ulonglong
+diff --git a/prometheus/process_collector_mem_nocgo_darwin.go b/prometheus/process_collector_mem_nocgo_darwin.go
+index 3788651..efeb773 100644
+--- a/prometheus/process_collector_mem_nocgo_darwin.go
++++ b/prometheus/process_collector_mem_nocgo_darwin.go
+@@ -15,6 +15,10 @@
+ 
+ package prometheus
+ 
++func getStartTime(int) (float64, error) {
++	return 0, errNotImplemented
++}
++
+ func getMemory() (*memoryInfo, error) {
+ 	return nil, errNotImplemented
+ }
