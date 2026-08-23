@@ -1,0 +1,66 @@
+diff --git a/hostinfo/hostinfo_darwin.go b/hostinfo/hostinfo_darwin.go
+index 338ab97..0485f89 100644
+--- a/hostinfo/hostinfo_darwin.go
++++ b/hostinfo/hostinfo_darwin.go
+@@ -7,7 +7,9 @@
+ 
+ import (
+ 	"os"
++	"os/exec"
+ 	"path/filepath"
++	"strings"
+ 
+ 	"golang.org/x/sys/unix"
+ )
+@@ -30,8 +32,15 @@ func packageTypeDarwin() string {
+ // Returns the marketing version (e.g., "15.0.1" or "26.0.0")
+ func osVersionDarwin() string {
+ 	version, err := unix.Sysctl("kern.osproductversion")
++	if err == nil {
++		return version
++	}
++
++	// kern.osproductversion is unavailable on older macOS releases. sw_vers
++	// is the public compatibility interface for the marketing version.
++	out, err := exec.Command("/usr/bin/sw_vers", "-productVersion").Output()
+ 	if err != nil {
+ 		return ""
+ 	}
+-	return version
++	return strings.TrimSpace(string(out))
+ }
+diff --git a/ipn/ipnlocal/breaktcp_darwin.go b/ipn/ipnlocal/breaktcp_darwin.go
+index a97f43e..2fc2648 100644
+--- a/ipn/ipnlocal/breaktcp_darwin.go
++++ b/ipn/ipnlocal/breaktcp_darwin.go
+@@ -17,6 +17,9 @@ func breakTCPConnsDarwin() error {
+ 	var matched int
+ 	for fd := range 1000 {
+ 		_, err := unix.GetsockoptTCPConnectionInfo(fd, unix.IPPROTO_TCP, unix.TCP_CONNECTION_INFO)
++		if err == unix.ENOPROTOOPT && isConnectedInetStream(fd) {
++			err = nil
++		}
+ 		if err == nil {
+ 			matched++
+ 			err = unix.Close(fd)
+@@ -28,3 +31,20 @@ func breakTCPConnsDarwin() error {
+ 	}
+ 	return nil
+ }
++
++func isConnectedInetStream(fd int) bool {
++	socketType, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
++	if err != nil || socketType != unix.SOCK_STREAM {
++		return false
++	}
++	peer, err := unix.Getpeername(fd)
++	if err != nil {
++		return false
++	}
++	switch peer.(type) {
++	case *unix.SockaddrInet4, *unix.SockaddrInet6:
++		return true
++	default:
++		return false
++	}
++}

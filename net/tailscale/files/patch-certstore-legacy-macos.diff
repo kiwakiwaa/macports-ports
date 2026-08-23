@@ -179,8 +179,8 @@ index ae511b3..3f6bbb6 100644
 -
 -	var cret C.CFArrayRef
 -	if err := osStatusError(C.SecPKCS12Import(cdata, cops, &cret)); err != nil {
-+	// SecPKCS12Import's dictionary key is not exported by Snow Leopard's
-+	// Security framework. Its older item-import API supports the same format.
++	// Older Security headers do not export SecPKCS12Import's identity key.
++	// The older item-import API supports the same format.
 +	if err := osStatusError(C.certstorePKCS12Import(cdata, cpass)); err != nil {
  		return err
  	}
@@ -232,7 +232,7 @@ index ae511b3..3f6bbb6 100644
  
 -	certChain := C.SecTrustCopyCertificateChain(trustRef)
 -	if certChain == nilCFArrayRef {
-+	// Snow Leopard's newer-looking trust accessors are unimplemented stubs.
++	// Newer trust accessors are unavailable or unimplemented on legacy macOS.
 +	// The older result API returns the evaluated chain when both outputs exist.
 +	var chainRef C.CFArrayRef
 +	if err := osStatusError(C.certstoreTrustCopyChain(trustRef, &chainRef)); err != nil {
@@ -286,8 +286,8 @@ index ae511b3..3f6bbb6 100644
 -	defer C.CFRelease(C.CFTypeRef(query))
  
 -	if err := osStatusError(C.SecItemDelete(query)); err != nil {
-+	// Snow Leopard's SecItem API only handles Internet passwords. Identity
-+	// deletion therefore removes both keychain items that form the identity.
++	// Legacy SecItem behaviour for identities differs between releases.
++	// Delete both keychain items directly for consistent behaviour.
 +	if err := osStatusError(C.SecKeychainItemDelete(C.SecKeychainItemRef(keyRef))); err != nil {
 +		return err
 +	}

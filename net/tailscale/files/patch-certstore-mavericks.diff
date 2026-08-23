@@ -1,0 +1,13 @@
+diff --git a/certstore_darwin.go b/certstore_darwin.go
+index f5f0e2b..39942f6 100644
+--- a/certstore_darwin.go
++++ b/certstore_darwin.go
+@@ -239,7 +239,7 @@ func (i *macIdentity) CertificateChain() ([]*x509.Certificate, error) {
+ 	defer C.CFRelease(C.CFTypeRef(certArray))
+ 
+ 	var trustRef C.SecTrustRef
+-	osStatusResult := C.SecTrustCreateWithCertificates(certArray, C.CFTypeRef(policy), &trustRef)
++	osStatusResult := C.SecTrustCreateWithCertificates(C.CFTypeRef(certArray), C.CFTypeRef(policy), &trustRef)
+ 	if err := osStatusError(osStatusResult); err != nil {
+ 		return nil, err
+ 	}

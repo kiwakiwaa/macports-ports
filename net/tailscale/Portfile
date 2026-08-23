@@ -3,10 +3,14 @@
 PortSystem          1.0
 PortGroup           golang 1.0
 
+if {${os.platform} eq "darwin" && ${os.major} == 13} {
+    configure.compiler macports-clang-16
+}
+
 go.setup            github.com/tailscale/tailscale 1.102.3 v
 go.package          tailscale.com
 go.toolchain_min    1.26.5
-revision            2
+revision            3
 
 homepage            https://tailscale.com
 
@@ -572,12 +576,25 @@ post-extract {
     close ${gomod}
 }
 
+if {${os.platform} eq "darwin" && ${os.major} == 13} {
+    post-extract {
+        system -W ${worksrcpath} \
+            "${patch.cmd} -p1 < ${filespath}/patch-tailscale-legacy-macos.diff"
+        system -W ${gopath}/src/github.com/tailscale/certstore \
+            "${patch.cmd} -p1 < ${filespath}/patch-certstore-legacy-macos.diff"
+    }
+    post-patch {
+        system -W ${gopath}/src/github.com/tailscale/certstore \
+            "${patch.cmd} -p1 < ${filespath}/patch-certstore-mavericks.diff"
+    }
+}
+
 if {${os.platform} eq "darwin" && ${os.major} == 10} {
     post-extract {
         system -W ${worksrcpath} \
             "${patch.cmd} -p1 < ${filespath}/patch-tailscale-snow-leopard.diff"
         system -W ${gopath}/src/github.com/tailscale/certstore \
-            "${patch.cmd} -p1 < ${filespath}/patch-certstore-snow-leopard.diff"
+            "${patch.cmd} -p1 < ${filespath}/patch-certstore-legacy-macos.diff"
         system -W ${gopath}/src/github.com/tailscale/peercred \
             "${patch.cmd} -p1 < ${filespath}/patch-peercred-snow-leopard.diff"
         system -W ${gopath}/src/github.com/prometheus/client_golang \
