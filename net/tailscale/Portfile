@@ -12,7 +12,7 @@ go.package          tailscale.com
 go.toolchain_min    1.26.5
 revision            4
 if {${os.platform} eq "darwin" && ${os.major} == 10} {
-    revision        5
+    revision        6
 }
 
 homepage            https://tailscale.com

@@ -77,7 +77,7 @@
  	var script strings.Builder
  	script.WriteString("d.init\n")
  	script.WriteString("d.add SearchOrder # 100000\n")
-@@ -142,8 +160,17 @@
+@@ -142,8 +160,24 @@
  		script.WriteString(ip.String())
  	}
  	script.WriteByte('\n')
@@ -85,9 +85,16 @@
 -	script.WriteString("d.add SupplementalMatchDomains * \"\"\n")
 +	if split {
 +		script.WriteString("d.add SupplementalMatchDomains *")
-+		for _, fqdn := range cfg.MatchDomains {
-+			script.WriteByte(' ')
-+			writeScutilString(&script, fqdn.WithoutTrailingDot())
++		// Darwin 10 retains only the first ten supplemental domains. Forward
++		// lookups matter for connectivity, so place reverse zones last.
++		for _, reverse := range []bool{false, true} {
++			for _, fqdn := range cfg.MatchDomains {
++				if strings.HasSuffix(string(fqdn), ".arpa.") != reverse {
++					continue
++				}
++				script.WriteByte(' ')
++				writeScutilString(&script, fqdn.WithoutTrailingDot())
++			}
 +		}
 +		script.WriteByte('\n')
 +	} else {
@@ -97,7 +104,7 @@
  	if len(cfg.SearchDomains) > 0 {
  		script.WriteString("d.add SearchDomains *")
  		for _, fqdn := range cfg.SearchDomains {
-@@ -153,7 +180,7 @@
+@@ -153,7 +187,7 @@
  		script.WriteByte('\n')
  	}
  	script.WriteString("set ")
@@ -106,7 +113,7 @@
  	script.WriteString("\nquit\n")
  
  	out, err := c.runScutilScript(script.String())
-@@ -162,13 +189,13 @@
+@@ -162,13 +196,13 @@
  	}
  	out = strings.TrimSpace(out)
  	if out != "" {
@@ -122,7 +129,7 @@
  	out, err := c.runScutilScript(script)
  	if err != nil {
  		return err
-@@ -177,7 +204,7 @@
+@@ -177,7 +211,7 @@
  	if out == "" || out == "No such key" {
  		return nil
  	}
@@ -170,8 +177,8 @@
 +		},
 +		SearchDomains: []dnsname.FQDN{"tail1234.ts.net."},
 +		MatchDomains: []dnsname.FQDN{
-+			"tail1234.ts.net.",
 +			"64.100.in-addr.arpa.",
++			"tail1234.ts.net.",
 +		},
  	}
 +	if err := c.SetDNS(cfg); err != nil {
