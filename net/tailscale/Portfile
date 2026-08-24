@@ -11,6 +11,9 @@ go.setup            github.com/tailscale/tailscale 1.102.3 v
 go.package          tailscale.com
 go.toolchain_min    1.26.5
 revision            4
+if {${os.platform} eq "darwin" && ${os.major} == 10} {
+    revision        5
+}
 
 homepage            https://tailscale.com
 
@@ -602,6 +605,8 @@ if {${os.platform} eq "darwin" && ${os.major} == 10} {
     post-extract {
         system -W ${worksrcpath} \
             "${patch.cmd} -p1 < ${filespath}/patch-tailscale-snow-leopard.diff"
+        system -W ${worksrcpath} \
+            "${patch.cmd} -p1 < ${filespath}/patch-tailscale-snow-dns.diff"
         system -W ${gopath}/src/github.com/tailscale/certstore \
             "${patch.cmd} -p1 < ${filespath}/patch-certstore-legacy-macos.diff"
         system -W ${gopath}/src/github.com/tailscale/peercred \
